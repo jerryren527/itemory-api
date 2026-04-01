@@ -1,0 +1,8 @@
+.vscode
+app/__pycache__/*
+itemory_project/__pycache__/*
+.DS_Store
+.env
+
+# __pycache__ files
+*.pyc
