@@ -9,7 +9,8 @@ import json
 from urllib.parse import quote  # escape invalid characters in url string
 from django.http import HttpResponseRedirect
 from google.oauth2 import id_token
-from google.auth.transport import requests
+from google.auth.transport import requests as google_auth_requests
+import jwt as pyjwt
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.core import signing
 from django.utils import timezone
@@ -21,7 +22,7 @@ from django.core.signing import TimestampSigner
 from datetime import timedelta, datetime
 from django.contrib.auth import authenticate
 import time
-from .services import place_node_helpers
+# from .services import place_node_helpers
 
 from .models import CustomUser, PasswordResetToken, Room, Container, Item, Home, HomeMembership
 from .serializers import RegisterSerializer, IdentifySerializer, LoginSerializer,  ResetPasswordSerializer, ChildSerializer, NodeDetailsSerializer, HomeSerializer, RoomSerializer
@@ -52,6 +53,7 @@ def me(request):
         "has_password": user.has_password,
         "google_account_linked": user.google_account_linked,
         "google_sub": user.google_sub,
+        "apple_account_linked": user.apple_account_linked,
         "id": user.id,
         "primary_home": user.primary_home.id if user.primary_home else None,
     }
@@ -264,7 +266,7 @@ def register(request):
 
                 # print('calling RegisterSerializer.send_verification_email()...')
                 # serializer.send_verification_email(user)
-                # register_serializer.send_verification_email(new_user)
+                register_serializer.send_verification_email(new_user)
 
                 # send_verification_email() does not throw an error
                 res = {
@@ -277,30 +279,27 @@ def register(request):
                 # DRF already serializes serializer.errors -- it is proper JSON. No need to stringify it.
                 return Response(register_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         else:
-            if not user.email_verified:
-                if user.google_account_linked:
-                    # Account with this email already exists. Find out if they have Google Sign In auth option.
-                    res = {
-                        'message': 'This email is already linked to Google. Please Log in with Google.',
-                        'user_has_google': user.google_account_linked
-                    }
-                    return Response(res, status=status.HTTP_409_CONFLICT)
-                else:
-                    # if the email is not verified yet, still send the verification email.
-                    # print('The email is not verified yet. Sending another verification email.')
-                    register_serializer.send_verification_email(user)
+            providers = []
+            if user.google_account_linked:
+                providers.append('Google')
+            if user.apple_account_linked:
+                providers.append('Apple')
 
-                    res = {
-                        'message': 'Verification Email sent!'
-                    }
-
-                    return Response(res, status=status.HTTP_200_OK)
+            if providers:
+                provider_str = ' and '.join(providers)
+                return Response({
+                    'message': f'This email is already linked to {provider_str}. Please sign in with {provider_str}.',
+                    'user_has_google': user.google_account_linked,
+                    'user_has_apple': user.apple_account_linked,
+                }, status=status.HTTP_409_CONFLICT)
+            elif not user.email_verified:
+                register_serializer.send_verification_email(user)
+                return Response({'message': 'Verification Email sent!'}, status=status.HTTP_200_OK)
             else:
-                res = {
-                    "message": "An account with this email address already exists."
-                }
-
-                return Response(res, status=status.HTTP_409_CONFLICT)
+                return Response(
+                    {"message": "An account with this email address already exists."},
+                    status=status.HTTP_409_CONFLICT,
+                )
 
     except Exception as err:
         # print('err:', err)
@@ -389,111 +388,330 @@ def email_sign_in(request):
 @api_view(['POST'])
 @permission_classes([permissions.AllowAny])
 def google_sign_in(request):
-    # Authorize Google User
-    print("INSIDE AUTHORIZE_USER")
-
-    print(request)
-
-    print('request.data:', request.data)
-    idToken = request.data.get('idToken')
+    id_token_str = request.data.get('idToken')
+    if not id_token_str:
+        return Response({"message": "idToken is required."}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
-        # print('os.getenv("GOOGLE_WEB_CLIENT_ID"):',
-        #       os.getenv('GOOGLE_WEB_CLIENT_ID'))
-        idInfo = id_token.verify_oauth2_token(idToken, requests.Request(
-        ), os.getenv('GOOGLE_WEB_CLIENT_ID'))
-        # print('idInfo:', idInfo)
-        # print('type(idInfo):', type(idInfo))
+        idInfo = id_token.verify_oauth2_token(
+            id_token_str,
+            google_auth_requests.Request(),
+            os.getenv('GOOGLE_WEB_CLIENT_ID'),
+        )
+    except Exception as err:
+        return Response({"message": f"Invalid Google token: {err}"}, status=status.HTTP_400_BAD_REQUEST)
 
-        if idInfo['email_verified'] == False:
-            res = {
-                "messsge": "Invalid Google Email"
-            }
-            return Response(res, status=status.HTTP_400_BAD_REQUEST)
+    if not idInfo.get('email_verified'):
+        return Response({"message": "Google email is not verified."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # the unique identifier is the email address.
-        # handle when email already exists through google log in.
-        # Decision for now: the emails must match -- the google email address that the user wants to link must match the email address they are currently signed in as.
+    google_sub = idInfo['sub']
 
-        # check if email address already exists in CustomUser table
-        # Model.MultipleObjectsReturned exception if .get() returns multiple matches
-        # Raises a Model.DoesNotExist exception if not matches.
-        # Will use filter instead and get the length of the QuerySet instead of throwing an exception.
-        # user = CustomUser.objects.get(email=idInfo['email'])
-        user_query = CustomUser.objects.filter(email=idInfo['email'])
-        print('user_query:', user_query)
+    # Returning user — look up by sub
+    user = CustomUser.objects.filter(google_sub=google_sub).first()
 
-        if len(user_query) == 1:
-            print(f'user, {idInfo['email']}, is defined.')
-            user = user_query[0]
+    if not user:
+        if CustomUser.objects.filter(email__iexact=idInfo['email']).exists():
+            return Response(
+                {"message": "An account with this email already exists. Sign in with your password and link Google from Settings."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        user = CustomUser.objects.create_user(
+            email=idInfo['email'].lower(),
+            google_account_linked=True,
+            google_sub=google_sub,
+            google_picture_url=idInfo.get('picture'),
+            email_verified=True,
+        )
 
-            print(idInfo)
-            if not user.google_sub and user.google_account_linked == False:
-                print('google_account_linked is false.')
-                user.google_account_linked = True
-                user.google_picture_url = idInfo['picture']
-                user.google_sub = idInfo['sub']
-                user.save()
+    refresh = RefreshToken.for_user(user)
+    return Response({
+        "status": "ok",
+        "name": idInfo.get('name'),
+        "email": user.email,
+        "picture": idInfo.get('picture'),
+        "google_sub": google_sub,
+        "refresh_token": str(refresh),
+        "access_token": str(refresh.access_token),
+        "primary_home": user.primary_home.id if user.primary_home else None,
+    }, status=status.HTTP_200_OK)
 
-            print('====Creating access and refresh tokens...====')
-            refresh = RefreshToken.for_user(user)
-            access = refresh.access_token
 
-            print('refresh: ', refresh)
-            print('access: ', access)
+@api_view(['POST'])
+def google_link(request):
+    """Link a Google account to the authenticated user."""
+    id_token_str = request.data.get('idToken')
+    if not id_token_str:
+        return Response({"message": "idToken is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-            res = {
-                "name": idInfo['name'],
-                "email": idInfo['email'],
-                "picture": idInfo['picture'],
-                "google_sub": idInfo['sub'],
-                "refresh_token": str(refresh),
-                "access_token": str(access)
-            }
+    try:
+        idInfo = id_token.verify_oauth2_token(
+            id_token_str,
+            google_auth_requests.Request(),
+            os.getenv('GOOGLE_WEB_CLIENT_ID'),
+        )
+    except Exception as err:
+        return Response({"message": f"Invalid Google token: {err}"}, status=status.HTTP_400_BAD_REQUEST)
 
-            print('res:', res)
+    if not idInfo.get('email_verified'):
+        return Response({"message": "Google email is not verified."}, status=status.HTTP_400_BAD_REQUEST)
 
-            return Response(res, status=status.HTTP_200_OK)
-        elif len(user_query) > 1:
-            raise ValueError(
-                f"There should not be two records with email = {idInfo['email']}.")
+    google_sub = idInfo['sub']
+    current_user = request.user
+
+    if current_user.google_sub == google_sub:
+        return Response({"status": "ok"}, status=status.HTTP_200_OK)
+
+    other_user = CustomUser.objects.filter(google_sub=google_sub).exclude(pk=current_user.pk).first()
+    if other_user:
+        other_is_empty = (
+            not other_user.has_password
+            and not other_user.apple_sub
+            and not HomeMembership.objects.filter(user=other_user).exists()
+        )
+        if other_is_empty:
+            other_user.delete()
         else:
-            # There are no users
-            print(
-                f'user, {idInfo['email']}, is not defined. Creating user, {idInfo['email']}, now')
-
-            user = CustomUser.objects.create_user(
-                # ensure only lowercase emails in DB.
-                email=idInfo['email'].lower(),
-                google_account_linked=True,
-                google_sub=idInfo['sub'],
-                google_picture_url=idInfo['picture'],
+            return Response(
+                {"message": "This Google account is linked to another account with data. Please contact support."},
+                status=status.HTTP_409_CONFLICT,
             )
 
-            print('user created:', user)
+    current_user.google_sub = google_sub
+    current_user.google_account_linked = True
+    current_user.google_picture_url = idInfo.get('picture')
+    current_user.email_verified = True
+    current_user.save()
+    return Response({"status": "ok"}, status=status.HTTP_200_OK)
 
-            print('====Creating access and refresh tokens...====')
-            refresh = RefreshToken.for_user(user)
-            access = refresh.access_token
 
-            print('refresh: ', refresh)
-            print('access: ', access)
+@api_view(['POST'])
+def google_unlink(request):
+    """Unlink Google from the authenticated user's account."""
+    user = request.user
 
-            res = {
-                "name": idInfo['name'],
-                "email": idInfo['email'],
-                "picture": idInfo['picture'],
-                "google_sub": idInfo['sub'],
-                "refresh_token": str(refresh),
-                "access_token": str(access)
-            }
+    if not user.google_sub:
+        return Response({"message": "Google account is not linked."}, status=status.HTTP_400_BAD_REQUEST)
 
-            print('res:', res)
+    if not user.has_password and not user.apple_sub:
+        return Response(
+            {"message": "Cannot unlink Google — it is your only login method. Set a password or link another account first."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
-            return Response(res, status=status.HTTP_200_OK)
+    user.google_sub = None
+    user.google_account_linked = False
+    user.google_picture_url = None
+    user.save()
+    return Response({"status": "ok"}, status=status.HTTP_200_OK)
 
-    except ValueError as err:
-        print('err:', err)
+
+def _verify_apple_identity_token(identity_token):
+    """
+    Fetch Apple's public JWKS, find the matching key by kid, and verify the
+    RS256-signed identity token. Returns the decoded payload on success.
+    """
+    response = requests.get("https://appleid.apple.com/auth/keys", timeout=10)
+    apple_keys = response.json()["keys"]
+
+    header = pyjwt.get_unverified_header(identity_token)
+    matching_key = next(
+        (k for k in apple_keys if k["kid"] == header.get("kid")), None
+    )
+    if not matching_key:
+        raise ValueError("No matching Apple public key found for the provided token.")
+
+    public_key = pyjwt.algorithms.RSAAlgorithm.from_jwk(matching_key)
+    return pyjwt.decode(
+        identity_token,
+        key=public_key,
+        algorithms=["RS256"],
+        audience=os.getenv("APPLE_APP_BUNDLE_ID"),
+        issuer="https://appleid.apple.com",
+    )
+
+
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])
+def apple_sign_in(request):
+    identity_token = request.data.get('identityToken')
+    if not identity_token:
+        return Response({"message": "identityToken is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        payload = _verify_apple_identity_token(identity_token)
+    except requests.exceptions.RequestException:
+        return Response({"message": "Could not reach Apple's servers."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    except Exception as err:
+        return Response({"message": f"Invalid Apple identity token: {err}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    apple_sub = payload.get('sub')
+    user = CustomUser.objects.filter(apple_sub=apple_sub).first()
+
+    if not user:
+        return Response({"status": "new_apple_user"}, status=status.HTTP_200_OK)
+
+    refresh = RefreshToken.for_user(user)
+    return Response({
+        "status": "ok",
+        "email": user.email,
+        "refresh_token": str(refresh),
+        "access_token": str(refresh.access_token),
+        "primary_home": user.primary_home.id if user.primary_home else None,
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])
+def apple_confirm(request):
+    """Create a new account for a first-time Apple user."""
+    identity_token = request.data.get('identityToken')
+    if not identity_token:
+        return Response({"message": "identityToken is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        payload = _verify_apple_identity_token(identity_token)
+    except requests.exceptions.RequestException:
+        return Response({"message": "Could not reach Apple's servers."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    except Exception as err:
+        return Response({"message": f"Invalid Apple identity token: {err}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    apple_sub = payload.get('sub')
+    email = payload.get('email')
+
+    if not email:
+        return Response(
+            {"message": "Email not provided by Apple. Please sign in with Apple again from a fresh install."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Race condition guard: sub already registered
+    user = CustomUser.objects.filter(apple_sub=apple_sub).first()
+    if user:
+        refresh = RefreshToken.for_user(user)
+        return Response({
+            "status": "ok",
+            "email": user.email,
+            "refresh_token": str(refresh),
+            "access_token": str(refresh.access_token),
+            "primary_home": user.primary_home.id if user.primary_home else None,
+        }, status=status.HTTP_200_OK)
+
+    if CustomUser.objects.filter(email__iexact=email).exists():
+        return Response(
+            {"message": "An account with this email already exists. Log in with your password and link Apple from Settings."},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    user = CustomUser.objects.create_user(
+        email=email.lower(),
+        apple_account_linked=True,
+        apple_sub=apple_sub,
+    )
+    refresh = RefreshToken.for_user(user)
+    return Response({
+        "status": "ok",
+        "email": user.email,
+        "refresh_token": str(refresh),
+        "access_token": str(refresh.access_token),
+        "primary_home": user.primary_home.id if user.primary_home else None,
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def apple_link(request):
+    """Link an Apple account to the authenticated user.
+    Used after email/password login when an existing user chooses Apple,
+    and from the Settings page."""
+    identity_token = request.data.get('identityToken')
+    if not identity_token:
+        return Response({"message": "identityToken is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        payload = _verify_apple_identity_token(identity_token)
+    except requests.exceptions.RequestException:
+        return Response({"message": "Could not reach Apple's servers."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    except Exception as err:
+        return Response({"message": f"Invalid Apple identity token: {err}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    apple_sub = payload.get('sub')
+    current_user = request.user
+
+    if current_user.apple_sub == apple_sub:
+        return Response({"status": "ok"}, status=status.HTTP_200_OK)
+
+    other_user = CustomUser.objects.filter(apple_sub=apple_sub).exclude(pk=current_user.pk).first()
+    if other_user:
+        other_is_empty = (
+            not other_user.has_password
+            and not other_user.google_sub
+            and not HomeMembership.objects.filter(user=other_user).exists()
+        )
+        if other_is_empty:
+            other_user.delete()
+        else:
+            return Response(
+                {"message": "This Apple account is linked to another account with data. Please contact support."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+    current_user.apple_sub = apple_sub
+    current_user.apple_account_linked = True
+    current_user.save()
+    return Response({"status": "ok"}, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def apple_unlink(request):
+    """Unlink Apple from the authenticated user's account."""
+    user = request.user
+
+    if not user.apple_sub:
+        return Response({"message": "Apple account is not linked."}, status=status.HTTP_400_BAD_REQUEST)
+
+    if not user.has_password and not user.google_sub:
+        return Response(
+            {"message": "Cannot unlink Apple — it is your only login method. Set a password or link another account first."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    user.apple_sub = None
+    user.apple_account_linked = False
+    user.save()
+    return Response({"status": "ok"}, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def set_password(request):
+    """Add or change the authenticated user's password."""
+    user = request.user
+    serializer = ResetPasswordSerializer(data=request.data, context={'user': user})
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    user.set_password(serializer.validated_data['password'])
+    user.has_password = True
+    user.save()
+    return Response({"status": "ok"}, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def remove_password(request):
+    """Remove password login from the authenticated user's account."""
+    user = request.user
+
+    if not user.has_password:
+        return Response({"message": "No password is set."}, status=status.HTTP_400_BAD_REQUEST)
+
+    if not user.google_sub and not user.apple_sub:
+        return Response(
+            {"message": "Cannot remove password — it is your only login method. Link Google or Apple first."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    user.set_password(None)
+    user.has_password = False
+    user.save()
+    return Response({"status": "ok"}, status=status.HTTP_200_OK)
 
 
 @api_view(['POST'])
