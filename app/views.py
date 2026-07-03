@@ -78,9 +78,6 @@ def test_view(request):
 @api_view(['POST'])
 @permission_classes([permissions.AllowAny])
 def login(request):
-    print(os.environ)
-    # print("=== INSIDE login() ===")
-    # time.sleep(10)
     try:
         serializer = LoginSerializer(data=request.data)
 
@@ -90,22 +87,9 @@ def login(request):
 
             user = authenticate(email=email, password=password)
 
-            # check if the user's email address is verified
-            if user and user.email_verified:
-                print(f'user: {user}')
-                print(f'type(user): {type(user)}')
-                print(f'user.has_password: {user.has_password}')
-                print(f'user.email_verified: {user.email_verified}')
-                print(
-                    f'user.google_account_linked: {user.google_account_linked}')
-                print(f'user.primary_home: {user.primary_home}')
-
-                # print('user email address is verified')
-                # Create tokens
+            if user:
                 refresh = RefreshToken.for_user(user)
-
-                # send tokens
-                res = {
+                return Response({
                     'id': user.id,
                     'email': user.email,
                     'tokens': {
@@ -116,55 +100,15 @@ def login(request):
                     'email_verified': user.email_verified,
                     'google_account_linked': user.google_account_linked,
                     'primary_home': user.primary_home.id if user.primary_home else None,
-                }
-                return Response(res, status=status.HTTP_200_OK)
-            elif user and not user.email_verified and not user.google_account_linked:
-                # User's email is not verified, and they are not a google-only user
-                res = {
-                    'message': 'Email addresss is not verified yet.'
-                }
-                return Response(res, status=status.HTTP_401_UNAUTHORIZED)
-            elif user and not user.email_verified and user.google_account_linked:
-                res = {
-                    'message': f'{email} is a Google-only user and has not set up a password yet. Sign in with Google.'
-                }
-                return Response(res, status=status.HTTP_401_UNAUTHORIZED)
-
+                }, status=status.HTTP_200_OK)
             else:
-                # Check that the user is a Google-only user
-                # user_queryset = CustomUser.objects.filter(email=email)
-                # if len(user_queryset) == 1 and user_queryset[0].google_account_linked and not user_queryset[0].has_password:
-                #     res = {
-                #         'message': f'{email} is a Google-only user and has not set up a password yet. Sign in with Google.'
-                #     }
-                res = {
-                    'message': 'Email or password is incorrect.'
-                }
-                return Response(res, status=status.HTTP_401_UNAUTHORIZED)
+                return Response({'message': 'Email or password is incorrect.'}, status=status.HTTP_401_UNAUTHORIZED)
 
         else:
-            print('LoginSerializer had invalid input.')
             return Response(serializer.errors, status=status.HTTP_401_UNAUTHORIZED)
 
-    except serializers.ValidationError as err:
-        # TODO: flatten ValidationError message before sending to client
-        # print('There was a ValidationError:', err.detail['non_field_errors'][0])
-
-        # Get the ValidationError's message
-        res = {
-            'message': f"{str(err.detail['non_field_errors'][0])}",
-        }
-
-        return Response(res, status=status.HTTP_401_UNAUTHORIZED)
     except Exception as err:
-        # print('Unknown Error:', err)
-
-        res = {
-            'message': f"{err}",
-        }
-
-        # return Response(res, status=status.HTTP_400_BAD_REQUEST)
-        return Response(res, status=status.HTTP_401_UNAUTHORIZED)
+        return Response({'message': str(err)}, status=status.HTTP_401_UNAUTHORIZED)
 
 
 @api_view(['GET'])
