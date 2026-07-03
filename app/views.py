@@ -82,39 +82,15 @@ def login(request):
     # print("=== INSIDE login() ===")
     # time.sleep(10)
     try:
-        # email = request.data.get('email')
-        # password = request.data.get('password')
-        attrs = {
-            'email': request.data.get('email'),
-            'password': request.data.get('password'),
-        }
-        # print(attrs)
-
-        # request.data is the request payload sent with the HTTP request to 'app/login'.
-        # Without 'data=request.data', is_valid() throws an error, and you have no access to validated_data.
         serializer = LoginSerializer(data=request.data)
 
-        # serializer.is_valid(raise_exception=True)
         if serializer.is_valid():
-            # print('serializer.validated_data:', serializer.validated_data)
-            # Throws ValidationError if invalid email or password. Attaches 'users' to attrs if valid email and password.
-            serializer.validate(attrs)
+            email = serializer.validated_data['email'].lower()
+            password = serializer.validated_data['password']
 
-            user = serializer.validated_data
+            user = authenticate(email=email, password=password)
 
-            email = attrs['email'].lower()  # lowercase the user's input
-            password = attrs['password']
-
-            # django.contrib.auth.authenticate is case-sensitive, that is why we lowercased email.
-            user = authenticate(
-                # request=request.context.get('request'),
-                email=email,
-                password=password
-            )
-
-            # print('user', user)
-
-            # check if the user's email address is verififed
+            # check if the user's email address is verified
             if user and user.email_verified:
                 print(f'user: {user}')
                 print(f'type(user): {type(user)}')
@@ -606,6 +582,7 @@ def apple_confirm(request):
         email=email.lower(),
         apple_account_linked=True,
         apple_sub=apple_sub,
+        email_verified=True,
     )
     refresh = RefreshToken.for_user(user)
     return Response({
