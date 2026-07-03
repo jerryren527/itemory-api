@@ -87,7 +87,7 @@ def login(request):
 
             user = authenticate(email=email, password=password)
 
-            if user:
+            if user and user.email_verified:
                 refresh = RefreshToken.for_user(user)
                 return Response({
                     'id': user.id,
@@ -101,6 +101,8 @@ def login(request):
                     'google_account_linked': user.google_account_linked,
                     'primary_home': user.primary_home.id if user.primary_home else None,
                 }, status=status.HTTP_200_OK)
+            elif user:
+                return Response({'message': 'Email address is not verified yet.'}, status=status.HTTP_401_UNAUTHORIZED)
             else:
                 return Response({'message': 'Email or password is incorrect.'}, status=status.HTTP_401_UNAUTHORIZED)
 

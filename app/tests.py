@@ -445,20 +445,52 @@ class RegisterTests(APITestCase):
         self.assertTrue(user.email_verified)
 
     def test_register_with_invalid_email_returns_400(self):
-        """
-        Test that registering an invalid email returns 400 error.
-        """
-        # Register a user
-        url = reverse("app:register")  # app/register
-
-        data = {
-            "email": "testuserexample.com",  # invalid email format
-            "password": "StrongPassword123!",
-        }
-
-        response = self.client.post(url, data, format="json")
-
+        url = reverse("app:register")
+        response = self.client.post(url, {"email": "testuserexample.com", "password": "StrongPassword123!"}, format="json")
         self.assertEqual(response.status_code, 400)
+
+    def test_missing_email_returns_400(self):
+        url = reverse("app:register")
+        response = self.client.post(url, {"password": "StrongPassword123!"}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_missing_password_returns_400(self):
+        url = reverse("app:register")
+        response = self.client.post(url, {"email": "testuser@example.com"}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_weak_password_no_uppercase_returns_400(self):
+        url = reverse("app:register")
+        response = self.client.post(url, {"email": "testuser@example.com", "password": "password123!"}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_weak_password_no_number_returns_400(self):
+        url = reverse("app:register")
+        response = self.client.post(url, {"email": "testuser@example.com", "password": "Password!"}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_weak_password_no_special_char_returns_400(self):
+        url = reverse("app:register")
+        response = self.client.post(url, {"email": "testuser@example.com", "password": "Password123"}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_email_stored_lowercase(self):
+        url = reverse("app:register")
+        self.client.post(url, {"email": "TestUser@Example.COM", "password": "StrongPassword123!"}, format="json")
+        user = User.objects.first()
+        self.assertEqual(user.email, "testuser@example.com")
+
+    def test_has_password_set_after_registration(self):
+        url = reverse("app:register")
+        self.client.post(url, {"email": "testuser@example.com", "password": "StrongPassword123!"}, format="json")
+        user = User.objects.first()
+        self.assertTrue(user.has_password)
+
+    def test_email_not_verified_before_clicking_link(self):
+        url = reverse("app:register")
+        self.client.post(url, {"email": "testuser@example.com", "password": "StrongPassword123!"}, format="json")
+        user = User.objects.first()
+        self.assertFalse(user.email_verified)
 
 
 class RegisterConflictTests(APITestCase):
@@ -538,43 +570,49 @@ class RegisterConflictTests(APITestCase):
 class LoginTests(APITestCase):
 
     def setUp(self):
-        """
-        Runs before every testcase. Creates test user in database.
-        """
+        self.url = reverse("app:login")
         self.user = User.objects.create_user(
             email="testuser@example.com",
             password="StrongPassword123!",
-            email_verified=True
+            email_verified=True,
         )
 
-    def test_successful_login(self):
-        """
-        Test successful login of user who has verified their email address.
-        """
-        url = reverse("app:login")  # app/login
+    def _post(self, email="testuser@example.com", password="StrongPassword123!"):
+        return self.client.post(self.url, {"email": email, "password": password}, format="json")
 
-        data = {
-            "email": "testuser@example.com",
-            "password": "StrongPassword123!",
-        }
+    def test_successful_login_returns_200(self):
+        self.assertEqual(self._post().status_code, 200)
 
-        response = self.client.post(url, data, format="json")
+    def test_successful_login_response_shape(self):
+        response = self._post()
+        for key in ("id", "email", "tokens", "has_password", "email_verified", "google_account_linked", "primary_home"):
+            self.assertIn(key, response.data)
+        self.assertIn("access", response.data["tokens"])
+        self.assertIn("refresh", response.data["tokens"])
 
-        self.assertEqual(response.status_code, 200)
+    def test_wrong_password_returns_401(self):
+        self.assertEqual(self._post(password="WrongPassword1!").status_code, 401)
 
-    def test_failure_login(self):
-        """
-        Test failure login of a user that is not in the databse.
-        """
-        url = reverse("app:login")  # app/login
+    def test_nonexistent_email_returns_401(self):
+        self.assertEqual(self._post(email="nobody@example.com").status_code, 401)
 
-        data = {
-            "email": "testuser2@example.com",
-            "password": "StrongPassword123!",
-        }
+    def test_unverified_user_cannot_login(self):
+        User.objects.create_user(
+            email="unverified@example.com",
+            password="StrongPassword123!",
+            email_verified=False,
+        )
+        self.assertEqual(self._post(email="unverified@example.com").status_code, 401)
 
-        response = self.client.post(url, data, format="json")
+    def test_email_login_is_case_insensitive(self):
+        self.assertEqual(self._post(email="TESTUSER@EXAMPLE.COM").status_code, 200)
 
+    def test_missing_email_returns_401(self):
+        response = self.client.post(self.url, {"password": "StrongPassword123!"}, format="json")
+        self.assertEqual(response.status_code, 401)
+
+    def test_missing_password_returns_401(self):
+        response = self.client.post(self.url, {"email": "testuser@example.com"}, format="json")
         self.assertEqual(response.status_code, 401)
 
 
