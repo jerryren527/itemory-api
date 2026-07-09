@@ -25,7 +25,7 @@ import time
 # from .services import place_node_helpers
 
 from .models import CustomUser, PasswordResetToken, Room, Container, Item, Home, HomeMembership
-from .serializers import RegisterSerializer, IdentifySerializer, LoginSerializer,  ResetPasswordSerializer, ChildSerializer, NodeDetailsSerializer, HomeSerializer, RoomSerializer
+from .serializers import RegisterSerializer, IdentifySerializer, LoginSerializer, ResetPasswordSerializer, SetPasswordSerializer, ChildSerializer, NodeDetailsSerializer, HomeSerializer, RoomSerializer
 from django.core.exceptions import ObjectDoesNotExist
 
 
@@ -473,6 +473,7 @@ def apple_sign_in(request):
         return Response({"status": "new_apple_user"}, status=status.HTTP_200_OK)
 
     refresh = RefreshToken.for_user(user)
+    print("🚀 ~ views.py:476 ~ apple_sign_in ~ refresh:", refresh)
     return Response({
         "status": "ok",
         "email": user.email,
@@ -605,15 +606,33 @@ def apple_unlink(request):
 
 @api_view(['POST'])
 def set_password(request):
-    """Add or change the authenticated user's password."""
+    """Add or change the authenticated user's password.
+    Accepts an optional email for Apple relay email users who need
+    to set a usable login email alongside their password."""
     user = request.user
-    serializer = ResetPasswordSerializer(data=request.data, context={'user': user})
+    serializer = SetPasswordSerializer(data=request.data, context={'user': user})
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    new_email = serializer.validated_data.get('email')
+    if new_email:
+        new_email = new_email.lower()
+        if CustomUser.objects.filter(email__iexact=new_email).exclude(pk=user.pk).exists():
+            return Response(
+                {'message': 'An account with this email already exists.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        user.email = new_email
+        user.email_verified = False
 
     user.set_password(serializer.validated_data['password'])
     user.has_password = True
     user.save()
+
+    if new_email:
+        RegisterSerializer().send_verification_email(user)
+        return Response({"status": "ok", "verification_email_sent": True}, status=status.HTTP_200_OK)
+
     return Response({"status": "ok"}, status=status.HTTP_200_OK)
 
 

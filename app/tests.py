@@ -17,7 +17,6 @@ User = get_user_model()
 
 APPLE_SUB = "apple.sub.abc123"
 APPLE_EMAIL = "appleuser@privaterelay.appleid.com"
-
 VALID_APPLE_PAYLOAD = {"sub": APPLE_SUB, "email": APPLE_EMAIL}
 VALID_APPLE_PAYLOAD_NO_EMAIL = {"sub": APPLE_SUB}
 
@@ -68,7 +67,8 @@ class GoogleSignInTests(APITestCase):
 
     @patch("app.views.id_token.verify_oauth2_token", return_value=VALID_GOOGLE_IDINFO)
     def test_returning_user_matched_by_sub(self, _mock):
-        User.objects.create_user(email=GOOGLE_EMAIL, google_sub=GOOGLE_SUB, google_account_linked=True, email_verified=True)
+        User.objects.create_user(email=GOOGLE_EMAIL, google_sub=GOOGLE_SUB,
+                                 google_account_linked=True, email_verified=True)
         response = self._post()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["status"], "ok")
@@ -98,6 +98,7 @@ class GoogleLinkTests(APITestCase):
         return self.client.post(self.url, payload or {"idToken": "tok"}, format="json")
 
     def test_unauthenticated_returns_401(self):
+        # Cleared authentication header. DRF returns 401 before even calling view function.
         self.client.credentials()
         self.assertEqual(self._post().status_code, 401)
 
@@ -446,7 +447,9 @@ class RegisterTests(APITestCase):
 
     def test_register_with_invalid_email_returns_400(self):
         url = reverse("app:register")
-        response = self.client.post(url, {"email": "testuserexample.com", "password": "StrongPassword123!"}, format="json")
+        response = self.client.post(
+            url, {"email": "testuserexample.com", "password": "StrongPassword123!"},
+            format="json")
         self.assertEqual(response.status_code, 400)
 
     def test_missing_email_returns_400(self):
