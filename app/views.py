@@ -352,6 +352,7 @@ def google_sign_in(request):
         "email": user.email,
         "picture": idInfo.get('picture'),
         "google_sub": google_sub,
+        "google_account_linked": user.google_account_linked,
         "refresh_token": str(refresh),
         "access_token": str(refresh.access_token),
         "primary_home": user.primary_home.id if user.primary_home else None,
