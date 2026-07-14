@@ -17,6 +17,8 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     google_account_linked = models.BooleanField(default=False)
     google_sub = models.CharField(max_length=255, null=True, blank=True)
     google_picture_url = models.URLField(null=True, blank=True)
+    apple_account_linked = models.BooleanField(default=False)
+    apple_sub = models.CharField(max_length=255, null=True, blank=True, unique=True)
 
     # Required fields needed for CustomUser to work with Django Admin. Extending AbstractUser will provide fields like is_active, is_staff, is_superuser, date_joined. But CustomUser extends AbstractBaseUser. So I NEED to provide these fields myself. Django expects them for Django admin, and createsuperuser. The minimum required fields are is_staff and is_active.
     is_active = models.BooleanField(default=True)
