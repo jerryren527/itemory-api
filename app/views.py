@@ -99,6 +99,7 @@ def login(request):
                     'has_password': user.has_password,
                     'email_verified': user.email_verified,
                     'google_account_linked': user.google_account_linked,
+                    'apple_account_linked': user.apple_account_linked,
                     'primary_home': user.primary_home.id if user.primary_home else None,
                 }, status=status.HTTP_200_OK)
             elif user:
@@ -478,6 +479,8 @@ def apple_sign_in(request):
     return Response({
         "status": "ok",
         "email": user.email,
+        "apple_sub": apple_sub,
+        "apple_account_linked": user.apple_account_linked,
         "refresh_token": str(refresh),
         "access_token": str(refresh.access_token),
         "primary_home": user.primary_home.id if user.primary_home else None,
