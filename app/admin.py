@@ -17,7 +17,7 @@ class CustomUserAdmin(BaseUserAdmin):
     fieldsets = (
         (None, {"fields": ("email", "password", "primary_home")}),
         ("Authentication", {"fields": (
-            "has_password", "google_account_linked", "google_sub", "google_picture_url", "apple_account_linked", "apple_sub", )}),
+            "has_password", "google_account_linked", "google_sub", "google_email", "google_picture_url", "apple_account_linked", "apple_sub", )}),
         ("Permissions", {"fields": ("is_staff",
          "is_superuser", "groups", "user_permissions")}),
         ("Important dates", {"fields": (

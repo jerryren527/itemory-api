@@ -53,6 +53,7 @@ def me(request):
         "has_password": user.has_password,
         "google_account_linked": user.google_account_linked,
         "google_sub": user.google_sub,
+        "google_email": user.google_email,
         "apple_account_linked": user.apple_account_linked,
         "id": user.id,
         "primary_home": user.primary_home.id if user.primary_home else None,
@@ -99,6 +100,7 @@ def login(request):
                     'has_password': user.has_password,
                     'email_verified': user.email_verified,
                     'google_account_linked': user.google_account_linked,
+                    'google_email': user.google_email,
                     'apple_account_linked': user.apple_account_linked,
                     'primary_home': user.primary_home.id if user.primary_home else None,
                 }, status=status.HTTP_200_OK)
@@ -342,9 +344,13 @@ def google_sign_in(request):
             email=idInfo['email'].lower(),
             google_account_linked=True,
             google_sub=google_sub,
+            google_email=idInfo['email'].lower(),
             google_picture_url=idInfo.get('picture'),
             email_verified=True,
         )
+    elif user.google_email != idInfo['email'].lower():
+        user.google_email = idInfo['email'].lower()
+        user.save()
 
     refresh = RefreshToken.for_user(user)
     return Response({
@@ -354,6 +360,7 @@ def google_sign_in(request):
         "picture": idInfo.get('picture'),
         "google_sub": google_sub,
         "google_account_linked": user.google_account_linked,
+        "google_email": user.google_email,
         "refresh_token": str(refresh),
         "access_token": str(refresh.access_token),
         "primary_home": user.primary_home.id if user.primary_home else None,
@@ -402,10 +409,11 @@ def google_link(request):
 
     current_user.google_sub = google_sub
     current_user.google_account_linked = True
+    current_user.google_email = idInfo['email'].lower()
     current_user.google_picture_url = idInfo.get('picture')
     current_user.email_verified = True
     current_user.save()
-    return Response({"status": "ok"}, status=status.HTTP_200_OK)
+    return Response({"status": "ok", "google_email": current_user.google_email}, status=status.HTTP_200_OK)
 
 
 @api_view(['POST'])
@@ -424,6 +432,7 @@ def google_unlink(request):
 
     user.google_sub = None
     user.google_account_linked = False
+    user.google_email = None
     user.google_picture_url = None
     user.save()
     return Response({"status": "ok"}, status=status.HTTP_200_OK)

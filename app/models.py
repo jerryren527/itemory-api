@@ -16,6 +16,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     has_password = models.BooleanField(default=False)
     google_account_linked = models.BooleanField(default=False)
     google_sub = models.CharField(max_length=255, null=True, blank=True)
+    google_email = models.EmailField(null=True, blank=True)
     google_picture_url = models.URLField(null=True, blank=True)
     apple_account_linked = models.BooleanField(default=False)
     apple_sub = models.CharField(max_length=255, null=True, blank=True, unique=True)
