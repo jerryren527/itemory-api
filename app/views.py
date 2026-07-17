@@ -616,7 +616,12 @@ def set_password(request):
     user = request.user
     serializer = SetPasswordSerializer(data=request.data, context={'user': user})
     if not serializer.is_valid():
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        error_message = "There was an error."
+        for field in ('old_password', 'password', 'confirm_password', 'email'):
+            if field in serializer.errors:
+                error_message = serializer.errors[field][0]
+                break
+        return Response({'message': error_message}, status=status.HTTP_400_BAD_REQUEST)
 
     new_email = serializer.validated_data.get('email')
     if new_email:
