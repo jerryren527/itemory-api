@@ -14,7 +14,14 @@ class Command(BaseCommand):
         self.stdout.write("Seeding data...")
 
         # ---- USERS ----
-        alice = User.objects.get(email="alice@example.com")
+        alice, created = User.objects.get_or_create(
+            email="alice@example.com",
+            defaults={"email_verified": True},
+        )
+        if created:
+            alice.set_password("Password123!")
+            alice.has_password = True
+            alice.save()
 
         # ---- HOME ----
         apt1 = Home.objects.create(
@@ -28,6 +35,9 @@ class Command(BaseCommand):
             address="456 Main St",
             created_by=alice
         )
+
+        alice.primary_home = apt1
+        alice.save()
 
         # ---- ROOM ----
         living_room1 = Room.objects.create(

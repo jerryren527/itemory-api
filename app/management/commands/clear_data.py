@@ -18,10 +18,8 @@ class Command(BaseCommand):
         Home.objects.all().delete()
 
         # Optional: delete test users
-        # User.objects.filter(email__in=[
-        #     "alice@example.com",
-        #     "bob@example.com",
-        #     "charlie@example.com"
-        # ]).delete()
+        User.objects.filter(email__in=[
+            "alice@example.com",
+        ]).delete()
 
         self.stdout.write(self.style.SUCCESS("All dummy data deleted."))
