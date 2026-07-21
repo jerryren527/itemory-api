@@ -885,6 +885,54 @@ def get_node(request, node_type, node_id):
     )
 
 
+@api_view(['POST'])
+def create_home(request):
+    """Create a Home for the authenticated user.
+
+    The user becomes a member via HomeMembership. If the user has no
+    primary_home yet, this home is set as their primary home.
+    """
+    name = request.data.get('name')
+    if not name or not name.strip():
+        return Response({"message": "name is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    address = request.data.get('address')
+    user = request.user
+
+    home = Home.objects.create(name=name.strip(), address=address, created_by=user)
+    HomeMembership.objects.create(user=user, home=home)
+
+    if user.primary_home is None:
+        user.primary_home = home
+        user.save()
+
+    return Response(
+        HomeSerializer(home, context={'user': user}).data,
+        status=status.HTTP_201_CREATED,
+    )
+
+
+@api_view(['POST'])
+def set_primary_home(request):
+    """Set the authenticated user's primary_home to a home they are a member of."""
+    home_id = request.data.get('home_id')
+    if not home_id:
+        return Response({"message": "home_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    user = request.user
+    membership = HomeMembership.objects.filter(user=user, home_id=home_id).first()
+    if not membership:
+        return Response(
+            {"message": f"Home with id {home_id} not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    user.primary_home = membership.home
+    user.save()
+
+    return Response({"status": "ok", "primary_home": user.primary_home.id}, status=status.HTTP_200_OK)
+
+
 @api_view(['GET'])
 def get_places_tab(request, home_id):
     try:
