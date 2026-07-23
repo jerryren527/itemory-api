@@ -7,6 +7,7 @@ from django.core import mail
 import re
 from unittest.mock import patch
 from rest_framework_simplejwt.tokens import RefreshToken
+from app.models import Home, HomeMembership, Room, Container, Item
 
 
 # get_user_model will return whatever model is set in settings.AUTH_USER_MODEL
@@ -655,3 +656,193 @@ class ProtectedTests(APITestCase):
         # print(f"response.data: {response.data}")
 
         self.assertEqual(response.status_code, 200)
+
+
+class SearchNodesTests(APITestCase):
+
+    def setUp(self):
+        self.url = reverse("app:search-nodes")
+
+        self.user = User.objects.create_user(
+            email="searcher@example.com",
+            password="Pass123!",
+            email_verified=True,
+        )
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {refresh.access_token}")
+
+        self.other_user = User.objects.create_user(
+            email="other@example.com",
+            password="Pass123!",
+            email_verified=True,
+        )
+
+        # Home the searching user belongs to.
+        self.home = Home.objects.create(name="My Home", created_by=self.user)
+        HomeMembership.objects.create(user=self.user, home=self.home)
+
+        self.room = Room.objects.create(name="Kitchen", home=self.home, created_by=self.user)
+        self.other_room = Room.objects.create(name="Garage", home=self.home, created_by=self.user)
+
+        self.container = Container.objects.create(
+            name="Kitchen Cabinet", room=self.room, level=1, created_by=self.user,
+        )
+        self.nested_container = Container.objects.create(
+            name="Top Shelf", parent_container=self.container, level=2, created_by=self.user,
+        )
+
+        self.room_item = Item.objects.create(name="Kitchen Knife", room=self.room, created_by=self.user)
+        self.container_item = Item.objects.create(name="Blender", container=self.container, created_by=self.user)
+        self.nested_item = Item.objects.create(
+            name="Spice Rack Kitchen", container=self.nested_container, created_by=self.user,
+        )
+
+        # A home the searching user does NOT belong to — must never appear in results.
+        self.foreign_home = Home.objects.create(name="Other Home", created_by=self.other_user)
+        HomeMembership.objects.create(user=self.other_user, home=self.foreign_home)
+        self.foreign_room = Room.objects.create(
+            name="Kitchen Foreign", home=self.foreign_home, created_by=self.other_user,
+        )
+
+    def _get(self, params):
+        return self.client.get(self.url, params)
+
+    # --- Validation ---
+
+    def test_unauthenticated_returns_401(self):
+        self.client.credentials()
+        response = self._get({"q": "kitchen", "scope": "everywhere"})
+        self.assertEqual(response.status_code, 401)
+
+    def test_missing_q_returns_400(self):
+        response = self._get({"scope": "everywhere"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_blank_q_returns_400(self):
+        response = self._get({"q": "   ", "scope": "everywhere"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_missing_scope_returns_400(self):
+        response = self._get({"q": "kitchen"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_invalid_scope_returns_400(self):
+        response = self._get({"q": "kitchen", "scope": "bogus"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_folder_scope_missing_origin_type_returns_400(self):
+        response = self._get({"q": "kitchen", "scope": "folder", "origin_id": self.home.id})
+        self.assertEqual(response.status_code, 400)
+
+    def test_folder_scope_missing_origin_id_returns_400(self):
+        response = self._get({"q": "kitchen", "scope": "folder", "origin_type": "home"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_folder_scope_non_integer_origin_id_returns_400(self):
+        response = self._get({
+            "q": "kitchen", "scope": "folder", "origin_type": "home", "origin_id": "abc",
+        })
+        self.assertEqual(response.status_code, 400)
+
+    def test_folder_scope_home_not_accessible_returns_404(self):
+        response = self._get({
+            "q": "kitchen", "scope": "folder", "origin_type": "home", "origin_id": self.foreign_home.id,
+        })
+        self.assertEqual(response.status_code, 404)
+
+    def test_folder_scope_nonexistent_room_returns_404(self):
+        response = self._get({
+            "q": "kitchen", "scope": "folder", "origin_type": "room", "origin_id": 999999,
+        })
+        self.assertEqual(response.status_code, 404)
+
+    # --- everywhere scope ---
+
+    def test_everywhere_scope_matches_room_container_and_items(self):
+        response = self._get({"q": "kitchen", "scope": "everywhere"})
+        self.assertEqual(response.status_code, 200)
+        names = {r["name"] for r in response.data["results"]}
+        self.assertEqual(
+            names,
+            {"Kitchen", "Kitchen Cabinet", "Kitchen Knife", "Spice Rack Kitchen"},
+        )
+
+    def test_everywhere_scope_is_case_insensitive(self):
+        response = self._get({"q": "KITCHEN", "scope": "everywhere"})
+        self.assertEqual(response.status_code, 200)
+        names = {r["name"] for r in response.data["results"]}
+        self.assertIn("Kitchen", names)
+
+    def test_everywhere_scope_excludes_other_users_homes(self):
+        response = self._get({"q": "kitchen", "scope": "everywhere"})
+        self.assertEqual(response.status_code, 200)
+        names = {r["name"] for r in response.data["results"]}
+        self.assertNotIn("Kitchen Foreign", names)
+
+    def test_everywhere_scope_no_match_returns_empty_results(self):
+        response = self._get({"q": "nonexistentitem", "scope": "everywhere"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["results"], [])
+
+    def test_response_shape_includes_query_scope_and_home_tags(self):
+        response = self._get({"q": "kitchen", "scope": "everywhere"})
+        self.assertEqual(response.data["query"], "kitchen")
+        self.assertEqual(response.data["scope"], "everywhere")
+        for result in response.data["results"]:
+            self.assertEqual(result["home_id"], self.home.id)
+            self.assertEqual(result["home_name"], self.home.name)
+            self.assertIn("type", result)
+            self.assertIn("id", result)
+
+    # --- folder scope: home ---
+
+    def test_folder_scope_home_returns_matches_within_home(self):
+        response = self._get({
+            "q": "kitchen", "scope": "folder", "origin_type": "home", "origin_id": self.home.id,
+        })
+        self.assertEqual(response.status_code, 200)
+        names = {r["name"] for r in response.data["results"]}
+        self.assertEqual(
+            names,
+            {"Kitchen", "Kitchen Cabinet", "Kitchen Knife", "Spice Rack Kitchen"},
+        )
+
+    # --- folder scope: room ---
+
+    def test_folder_scope_room_excludes_room_itself_and_sibling_room(self):
+        response = self._get({
+            "q": "kitchen", "scope": "folder", "origin_type": "room", "origin_id": self.room.id,
+        })
+        self.assertEqual(response.status_code, 200)
+        names = {r["name"] for r in response.data["results"]}
+        # The room node itself is never a match candidate in room scope, only its descendants.
+        self.assertEqual(names, {"Kitchen Cabinet", "Kitchen Knife", "Spice Rack Kitchen"})
+
+    def test_folder_scope_room_does_not_include_other_rooms_items(self):
+        Item.objects.create(name="Kitchen Mat", room=self.other_room, created_by=self.user)
+        response = self._get({
+            "q": "kitchen", "scope": "folder", "origin_type": "room", "origin_id": self.room.id,
+        })
+        names = {r["name"] for r in response.data["results"]}
+        self.assertNotIn("Kitchen Mat", names)
+
+    # --- folder scope: container ---
+
+    def test_folder_scope_container_returns_only_nested_descendants(self):
+        response = self._get({
+            "q": "kitchen", "scope": "folder", "origin_type": "container", "origin_id": self.container.id,
+        })
+        self.assertEqual(response.status_code, 200)
+        names = {r["name"] for r in response.data["results"]}
+        # Only descendants of `container` match; the container itself and the
+        # room-level item are excluded.
+        self.assertEqual(names, {"Spice Rack Kitchen"})
+
+    def test_folder_scope_container_not_accessible_returns_404(self):
+        foreign_container = Container.objects.create(
+            name="Foreign Cabinet", room=self.foreign_room, level=1, created_by=self.other_user,
+        )
+        response = self._get({
+            "q": "kitchen", "scope": "folder", "origin_type": "container", "origin_id": foreign_container.id,
+        })
+        self.assertEqual(response.status_code, 404)

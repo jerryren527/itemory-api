@@ -196,6 +196,28 @@ class ChildSerializer(serializers.Serializer):
         return None
 
 
+class SearchResultSerializer(ChildSerializer):
+    """
+    A search result is a room/container/item, tagged with the home it was
+    found in. home_id/home_name are attached as ad hoc attributes on the raw
+    model instance by the search view before serializing (see search_nodes).
+    """
+    home_id = serializers.IntegerField()
+    home_name = serializers.CharField()
+
+
+class ItemNodeDetailsSerializer(serializers.Serializer):
+    name = serializers.CharField()
+    description = serializers.CharField(allow_null=True)
+    picture = serializers.URLField(allow_null=True)
+    quantity = serializers.IntegerField()
+    expiration_date = serializers.DateField(allow_null=True)
+    category = serializers.CharField(allow_null=True)
+    status = serializers.CharField()
+    tags = serializers.ListField(child=serializers.CharField(), allow_null=True)
+    comment = serializers.CharField(allow_null=True)
+
+
 class HomeSerializer(serializers.Serializer):
     """
     Serializer used to display two items in the Places Tab:

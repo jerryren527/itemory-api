@@ -1,5 +1,5 @@
 from django.urls import path, include
-from .views import google_sign_in, google_link, google_unlink, apple_sign_in, apple_confirm, apple_link, apple_unlink, email_sign_in, check_email, register, verify_email, login, test_view, send_reset_password_email, reset_password, me, get_node, get_places_tab, set_password, remove_password, create_home, set_primary_home
+from .views import google_sign_in, google_link, google_unlink, apple_sign_in, apple_confirm, apple_link, apple_unlink, email_sign_in, check_email, register, verify_email, login, test_view, send_reset_password_email, reset_password, me, get_node, get_places_tab, set_password, remove_password, create_home, set_primary_home, search_nodes
 
 app_name = "app"
 urlpatterns = [
@@ -39,6 +39,9 @@ urlpatterns = [
 
     # Endpoint for Places Tab
     path('places-tab/<int:home_id>', get_places_tab, name='get-places-tab'),
+
+    # Endpoint for Search
+    path('search', search_nodes, name='search-nodes'),
 
     # Endpoints for Home creation and primary home selection
     path('create-home', create_home, name='create-home'),

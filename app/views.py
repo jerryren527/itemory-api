@@ -21,11 +21,13 @@ from django.core.mail import send_mail
 from django.core.signing import TimestampSigner
 from datetime import timedelta, datetime
 from django.contrib.auth import authenticate
+from django.db.models import Q
 import time
 # from .services import place_node_helpers
+from .services.search_helpers import resolve_search_scope
 
 from .models import CustomUser, PasswordResetToken, Room, Container, Item, Home, HomeMembership
-from .serializers import RegisterSerializer, IdentifySerializer, LoginSerializer, ResetPasswordSerializer, SetPasswordSerializer, ChildSerializer, NodeDetailsSerializer, HomeSerializer, RoomSerializer
+from .serializers import RegisterSerializer, IdentifySerializer, LoginSerializer, ResetPasswordSerializer, SetPasswordSerializer, ChildSerializer, NodeDetailsSerializer, ItemNodeDetailsSerializer, HomeSerializer, RoomSerializer, SearchResultSerializer
 from django.core.exceptions import ObjectDoesNotExist
 
 
@@ -871,7 +873,10 @@ def get_node(request, node_type, node_id):
         )
 
     # Looks at the node instance, finds its name attribute, and produces this JSON shape: { "name": "kitchen" }
-    node_details = NodeDetailsSerializer(node)
+    if node_type == 'item':
+        node_details = ItemNodeDetailsSerializer(node)
+    else:
+        node_details = NodeDetailsSerializer(node)
     # Looks at the node instances, extracts the fields declared in ChildSerializer, returns the JSON.
     # DRF needs many=True when serializing multiple objects.
     children = ChildSerializer(determine_children(node), many=True)
@@ -881,6 +886,71 @@ def get_node(request, node_type, node_id):
             "node_details": node_details.data,
             "children": children.data
         },
+        status=status.HTTP_200_OK
+    )
+
+
+@api_view(['GET'])
+def search_nodes(request):
+    """
+    Search rooms/containers/items the user has access to.
+
+    Query params:
+      q: search text (required)
+      scope: 'folder' | 'everywhere' (required)
+      origin_type: 'home' | 'room' | 'container' (required when scope='folder')
+      origin_id: int (required when scope='folder')
+    """
+    q = request.GET.get('q', '').strip()
+    scope = request.GET.get('scope')
+    origin_type = request.GET.get('origin_type')
+    origin_id = request.GET.get('origin_id')
+
+    if not q:
+        return Response({"message": "q is required."}, status=status.HTTP_400_BAD_REQUEST)
+    if scope not in ('folder', 'everywhere'):
+        return Response({"message": "scope must be 'folder' or 'everywhere'."}, status=status.HTTP_400_BAD_REQUEST)
+    if scope == 'folder' and (not origin_type or origin_id is None):
+        return Response(
+            {"message": "origin_type and origin_id are required when scope='folder'."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    origin_id_int = None
+    if origin_id is not None:
+        try:
+            origin_id_int = int(origin_id)
+        except (TypeError, ValueError):
+            return Response({"message": "origin_id must be an integer."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        result_scope = resolve_search_scope(request.user, scope, origin_type, origin_id_int)
+    except ValueError:
+        return Response({"message": "Origin not found or not accessible."}, status=status.HTTP_404_NOT_FOUND)
+
+    home_by_room = result_scope['home_by_room']
+    home_by_container = result_scope['home_by_container']
+
+    rooms = list(Room.objects.filter(id__in=result_scope['match_room_ids'], name__icontains=q))
+    containers = list(Container.objects.filter(id__in=result_scope['match_container_ids'], name__icontains=q))
+    items = list(Item.objects.filter(
+        Q(room_id__in=result_scope['item_room_ids']) | Q(container_id__in=result_scope['item_container_ids']),
+        name__icontains=q,
+    ))
+
+    for r in rooms:
+        r.home_id, r.home_name = home_by_room[r.id]
+    for c in containers:
+        c.home_id, c.home_name = home_by_container[c.id]
+    for i in items:
+        i.home_id, i.home_name = home_by_room.get(i.room_id) or home_by_container.get(i.container_id)
+
+    # Defensive cap, matching the no-pagination style of get_node/get_places_tab.
+    results = (rooms + containers + items)[:50]
+    serialized = SearchResultSerializer(results, many=True)
+
+    return Response(
+        {"query": q, "scope": scope, "results": serialized.data},
         status=status.HTTP_200_OK
     )
 
