@@ -5,7 +5,8 @@ from django.core import signing
 from django.core.mail import send_mail
 from rest_framework.exceptions import AuthenticationFailed
 from django.core.signing import TimestampSigner
-from .models import CustomUser, Room, Container, Item
+from .models import CustomUser, Room, Container, Item, HomeMembership, Home
+from .services.search_helpers import get_home_id_for_item
 
 
 User = get_user_model()  # reads AUTH_USER_MODEL in settings.py
@@ -68,14 +69,24 @@ class RegisterSerializer(serializers.Serializer):
     # Declare a serializer is similar to declaring a form. Access the serializer's properties with `.data` property on a RegisterSerializer instnace.
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True)
+    username = serializers.CharField(max_length=30)
 
     def validate_password(self, value):
         # django's validate_password() returns None if password is valid. Raises ValidationError
         validate_password(value)
         return value
 
+    def validate_username(self, value):
+        if CustomUser.objects.filter(username__iexact=value).exists():
+            raise serializers.ValidationError("This username is already taken.")
+        return value
+
     def create(self, validated_data):
-        return CustomUser.objects.create_user(email=validated_data["email"], password=validated_data["password"])
+        return CustomUser.objects.create_user(
+            email=validated_data["email"],
+            password=validated_data["password"],
+            username=validated_data["username"],
+        )
 
     def send_verification_email(self, user):
         # print('===INSIDE send_verification_email()===')
@@ -159,9 +170,17 @@ class SetPasswordSerializer(serializers.Serializer):
 #     name = serializers.CharField()
 
 class NodeDetailsSerializer(serializers.Serializer):
+    """
+    Shared by Room and Container node details. `level` is only meaningful
+    for Container (1-5); Room has no such attribute, so it serializes as null.
+    """
     name = serializers.CharField()
     description = serializers.CharField(allow_null=True)
     picture = serializers.URLField(allow_null=True)
+    level = serializers.SerializerMethodField()
+
+    def get_level(self, obj):
+        return getattr(obj, 'level', None)
 
 
 class ChildSerializer(serializers.Serializer):
@@ -213,24 +232,47 @@ class ItemNodeDetailsSerializer(serializers.Serializer):
     quantity = serializers.IntegerField()
     expiration_date = serializers.DateField(allow_null=True)
     category = serializers.CharField(allow_null=True)
-    status = serializers.CharField()
     tags = serializers.ListField(child=serializers.CharField(), allow_null=True)
     comment = serializers.CharField(allow_null=True)
+    available_quantity = serializers.SerializerMethodField()
+    checkouts = serializers.SerializerMethodField()
+    can_manage_checkouts = serializers.SerializerMethodField()
+
+    def get_available_quantity(self, obj):
+        checked_out = sum(c.quantity for c in obj.checkouts.all())
+        return max(obj.quantity - checked_out, 0)
+
+    def get_checkouts(self, obj):
+        return [
+            {"user_id": c.user_id, "username": c.user.username, "quantity": c.quantity}
+            for c in obj.checkouts.select_related('user').order_by('user__username')
+        ]
+
+    def get_can_manage_checkouts(self, obj):
+        request = self.context.get('request')
+        if not request:
+            return False
+        home_id = get_home_id_for_item(obj)
+        home = Home.objects.filter(pk=home_id).first() if home_id else None
+        return bool(home and home.created_by_id == request.user.id)
 
 
 class HomeSerializer(serializers.Serializer):
     """
-    Serializer used to display two items in the Places Tab:
-    1. the select home details.
-    2. the drop-down menu of homes that the user is a member of.
+    Serializer used to display a Home: in the Homes list, as a drill-down
+    node (node_type='home'), and after mutating actions (rename/share/etc).
     """
     id = serializers.IntegerField()
     name = serializers.CharField()
     address = serializers.CharField(allow_null=True)
+    updated_at = serializers.DateTimeField()
     is_primary = serializers.SerializerMethodField()
+    is_shared = serializers.SerializerMethodField()
+    is_creator = serializers.SerializerMethodField()
+    owner_username = serializers.SerializerMethodField()
 
     def get_is_primary(self, obj):
-        """        
+        """
         HomeSerializer(some_home, context={'user': request.user})
         - calls get_is_primary(self, obj), where obj is some_home.
         - obj is the object being serialzed - some_home, a Home instance.
@@ -238,10 +280,13 @@ class HomeSerializer(serializers.Serializer):
         user = self.context['user']  # from context parameter passed into the serializer
         return user.primary_home == obj
 
+    def get_is_shared(self, obj):
+        return HomeMembership.objects.filter(home=obj).count() > 1
 
-class RoomSerializer(serializers.Serializer):
-    """
-    Serializer used to display the rooms of the selected home.
-    """
-    id = serializers.IntegerField()
-    name = serializers.CharField()
+    def get_is_creator(self, obj):
+        user = self.context['user']
+        return obj.created_by_id == user.id
+
+    def get_owner_username(self, obj):
+        # created_by is SET_NULL if the creator's account was later deleted.
+        return obj.created_by.username if obj.created_by else None

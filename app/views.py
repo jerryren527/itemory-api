@@ -24,10 +24,18 @@ from django.contrib.auth import authenticate
 from django.db.models import Q
 import time
 # from .services import place_node_helpers
-from .services.search_helpers import resolve_search_scope
+from .services.search_helpers import (
+    resolve_search_scope,
+    resolve_container_home,
+    get_container_ids_for_home,
+    get_container_ids_under_room,
+    get_container_subtree_ids,
+    get_home_id_for_item,
+)
+from .services.username_helpers import generate_unique_username
 
-from .models import CustomUser, PasswordResetToken, Room, Container, Item, Home, HomeMembership
-from .serializers import RegisterSerializer, IdentifySerializer, LoginSerializer, ResetPasswordSerializer, SetPasswordSerializer, ChildSerializer, NodeDetailsSerializer, ItemNodeDetailsSerializer, HomeSerializer, RoomSerializer, SearchResultSerializer
+from .models import CustomUser, PasswordResetToken, Room, Container, Item, ItemCheckout, Home, HomeMembership
+from .serializers import RegisterSerializer, IdentifySerializer, LoginSerializer, ResetPasswordSerializer, SetPasswordSerializer, ChildSerializer, NodeDetailsSerializer, ItemNodeDetailsSerializer, HomeSerializer, SearchResultSerializer
 from django.core.exceptions import ObjectDoesNotExist
 
 
@@ -51,6 +59,7 @@ def me(request):
     # user.id
     user_json = {
         "email": user.email,
+        "username": user.username,
         "email_verified": user.email_verified,
         "has_password": user.has_password,
         "google_account_linked": user.google_account_linked,
@@ -95,6 +104,7 @@ def login(request):
                 return Response({
                     'id': user.id,
                     'email': user.email,
+                    'username': user.username,
                     'tokens': {
                         'access': str(refresh.access_token),
                         'refresh': str(refresh)
@@ -349,6 +359,7 @@ def google_sign_in(request):
             google_email=idInfo['email'].lower(),
             google_picture_url=idInfo.get('picture'),
             email_verified=True,
+            username=generate_unique_username(idInfo.get('name') or idInfo['email'].split('@')[0]),
         )
     elif user.google_email != idInfo['email'].lower():
         user.google_email = idInfo['email'].lower()
@@ -359,6 +370,7 @@ def google_sign_in(request):
         "status": "ok",
         "name": idInfo.get('name'),
         "email": user.email,
+        "username": user.username,
         "picture": idInfo.get('picture'),
         "google_sub": google_sub,
         "google_account_linked": user.google_account_linked,
@@ -490,6 +502,7 @@ def apple_sign_in(request):
     return Response({
         "status": "ok",
         "email": user.email,
+        "username": user.username,
         "apple_sub": apple_sub,
         "apple_account_linked": user.apple_account_linked,
         "refresh_token": str(refresh),
@@ -529,6 +542,7 @@ def apple_confirm(request):
         return Response({
             "status": "ok",
             "email": user.email,
+            "username": user.username,
             "refresh_token": str(refresh),
             "access_token": str(refresh.access_token),
             "primary_home": user.primary_home.id if user.primary_home else None,
@@ -545,11 +559,13 @@ def apple_confirm(request):
         apple_account_linked=True,
         apple_sub=apple_sub,
         email_verified=True,
+        username=generate_unique_username(email.split('@')[0]),
     )
     refresh = RefreshToken.for_user(user)
     return Response({
         "status": "ok",
         "email": user.email,
+        "username": user.username,
         "refresh_token": str(refresh),
         "access_token": str(refresh.access_token),
         "primary_home": user.primary_home.id if user.primary_home else None,
@@ -674,6 +690,23 @@ def remove_password(request):
     user.has_password = False
     user.save()
     return Response({"status": "ok"}, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def update_username(request):
+    """Change the authenticated user's username."""
+    username = (request.data.get('username') or '').strip()
+
+    if not username:
+        return Response({"message": "username is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    if CustomUser.objects.filter(username__iexact=username).exclude(pk=request.user.pk).exists():
+        return Response({"message": "This username is already taken."}, status=status.HTTP_409_CONFLICT)
+
+    user = request.user
+    user.username = username
+    user.save()
+    return Response({"status": "ok", "username": user.username}, status=status.HTTP_200_OK)
 
 
 @api_view(['POST'])
@@ -836,7 +869,10 @@ def determine_children(node):
     """
     children = []
 
-    if isinstance(node, Room):
+    if isinstance(node, Home):
+        children = list(Room.objects.filter(home=node).order_by("name"))
+
+    elif isinstance(node, Room):
         containers = Container.objects.filter(room=node).order_by("name")
         items = Item.objects.filter(room=node, container=None).order_by("name")
         children = list(containers) + list(items)
@@ -855,7 +891,18 @@ def determine_children(node):
 @permission_classes([permissions.AllowAny])
 def get_node(request, node_type, node_id):
     try:
-        if node_type == 'room':
+        if node_type == 'home':
+            node = Home.objects.get(pk=node_id)
+            # Unlike room/container/item (pre-existing AllowAny gap, left as-is),
+            # a home's full room listing is sensitive enough to gate explicitly.
+            if not request.user.is_authenticated or not HomeMembership.objects.filter(
+                user=request.user, home=node
+            ).exists():
+                return Response(
+                    {"message": f"home with id {node_id} not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        elif node_type == 'room':
             node = Room.objects.get(pk=node_id)
         elif node_type == 'container':
             node = Container.objects.get(pk=node_id)
@@ -874,7 +921,9 @@ def get_node(request, node_type, node_id):
 
     # Looks at the node instance, finds its name attribute, and produces this JSON shape: { "name": "kitchen" }
     if node_type == 'item':
-        node_details = ItemNodeDetailsSerializer(node)
+        node_details = ItemNodeDetailsSerializer(node, context={'request': request})
+    elif node_type == 'home':
+        node_details = HomeSerializer(node, context={'user': request.user})
     else:
         node_details = NodeDetailsSerializer(node)
     # Looks at the node instances, extracts the fields declared in ChildSerializer, returns the JSON.
@@ -888,6 +937,327 @@ def get_node(request, node_type, node_id):
         },
         status=status.HTTP_200_OK
     )
+
+
+@api_view(['POST'])
+def create_room(request):
+    """Create a Room directly under a Home. Any member of the home may do this."""
+    home_id = request.data.get('home_id')
+    name = (request.data.get('name') or '').strip()
+    description = request.data.get('description') or None
+
+    if not home_id or not name:
+        return Response({"message": "home_id and name are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    if not HomeMembership.objects.filter(user=request.user, home_id=home_id).exists():
+        return Response({"message": f"Home with id {home_id} not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    room = Room.objects.create(name=name, description=description, home_id=home_id, created_by=request.user)
+    return Response({"status": "ok", "id": room.id}, status=status.HTTP_201_CREATED)
+
+
+@api_view(['POST'])
+def create_container(request):
+    """
+    Create a Container under a Room (level 1) or another Container (level =
+    parent.level + 1, capped at 5). Any member of the owning home may do this.
+    """
+    name = (request.data.get('name') or '').strip()
+    description = request.data.get('description') or None
+    room_id = request.data.get('room_id')
+    parent_container_id = request.data.get('parent_container_id')
+
+    if not name:
+        return Response({"message": "name is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    if bool(room_id) == bool(parent_container_id):
+        return Response(
+            {"message": "Exactly one of room_id or parent_container_id is required."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if room_id:
+        try:
+            room = Room.objects.get(pk=room_id)
+        except ObjectDoesNotExist:
+            return Response({"message": f"Room with id {room_id} not found."}, status=status.HTTP_404_NOT_FOUND)
+        home_id = room.home_id
+        level = 1
+        create_kwargs = {"room": room}
+    else:
+        try:
+            parent = Container.objects.get(pk=parent_container_id)
+        except ObjectDoesNotExist:
+            return Response(
+                {"message": f"Container with id {parent_container_id} not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if parent.level >= 5:
+            return Response(
+                {"message": "Containers cannot be nested deeper than 5 levels."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        home_tag = resolve_container_home(parent)
+        home_id = home_tag[0] if home_tag else None
+        level = parent.level + 1
+        create_kwargs = {"parent_container": parent}
+
+    if not home_id or not HomeMembership.objects.filter(user=request.user, home_id=home_id).exists():
+        return Response({"message": "Parent not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    container = Container.objects.create(
+        name=name, description=description, level=level, created_by=request.user, **create_kwargs
+    )
+    return Response({"status": "ok", "id": container.id}, status=status.HTTP_201_CREATED)
+
+
+@api_view(['POST'])
+def create_item(request):
+    """Create an Item under a Room or a Container. Any member of the owning home may do this."""
+    name = (request.data.get('name') or '').strip()
+    room_id = request.data.get('room_id')
+    container_id = request.data.get('container_id')
+
+    if not name:
+        return Response({"message": "name is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    if bool(room_id) == bool(container_id):
+        return Response(
+            {"message": "Exactly one of room_id or container_id is required."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if room_id:
+        try:
+            room = Room.objects.get(pk=room_id)
+        except ObjectDoesNotExist:
+            return Response({"message": f"Room with id {room_id} not found."}, status=status.HTTP_404_NOT_FOUND)
+        home_id = room.home_id
+        create_kwargs = {"room": room}
+    else:
+        try:
+            container = Container.objects.get(pk=container_id)
+        except ObjectDoesNotExist:
+            return Response(
+                {"message": f"Container with id {container_id} not found."}, status=status.HTTP_404_NOT_FOUND
+            )
+        home_tag = resolve_container_home(container)
+        home_id = home_tag[0] if home_tag else None
+        create_kwargs = {"container": container}
+
+    if not home_id or not HomeMembership.objects.filter(user=request.user, home_id=home_id).exists():
+        return Response({"message": "Parent not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    item = Item.objects.create(
+        name=name,
+        description=request.data.get('description') or None,
+        quantity=request.data.get('quantity') or 1,
+        category=request.data.get('category') or None,
+        expiration_date=request.data.get('expiration_date') or None,
+        comment=request.data.get('comment') or None,
+        tags=request.data.get('tags') or None,
+        picture=request.data.get('picture') or None,
+        created_by=request.user,
+        **create_kwargs,
+    )
+    return Response({"status": "ok", "id": item.id}, status=status.HTTP_201_CREATED)
+
+
+def _get_member_node_or_error(request, node_type, node_id):
+    """
+    Look up a Room/Container/Item by id and confirm the requester is a member
+    of its owning home. Returns (node, None) on success, or (None,
+    error_response) otherwise.
+    """
+    if node_type == 'room':
+        try:
+            node = Room.objects.get(pk=node_id)
+        except ObjectDoesNotExist:
+            return None, Response({"message": f"Room with id {node_id} not found."}, status=status.HTTP_404_NOT_FOUND)
+        home_id = node.home_id
+    elif node_type == 'container':
+        try:
+            node = Container.objects.get(pk=node_id)
+        except ObjectDoesNotExist:
+            return None, Response(
+                {"message": f"Container with id {node_id} not found."}, status=status.HTTP_404_NOT_FOUND
+            )
+        home_tag = resolve_container_home(node)
+        home_id = home_tag[0] if home_tag else None
+    elif node_type == 'item':
+        try:
+            node = Item.objects.get(pk=node_id)
+        except ObjectDoesNotExist:
+            return None, Response({"message": f"Item with id {node_id} not found."}, status=status.HTTP_404_NOT_FOUND)
+        home_id = get_home_id_for_item(node)
+    else:
+        return None, Response({"message": "Invalid node_type"}, status=status.HTTP_400_BAD_REQUEST)
+
+    if not home_id or not HomeMembership.objects.filter(user=request.user, home_id=home_id).exists():
+        return None, Response({"message": f"{node_type} with id {node_id} not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    return node, None
+
+
+@api_view(['POST'])
+def rename_node(request, node_type, node_id):
+    """Rename a Room, Container, or Item. Any member of the owning home may do this."""
+    node, error = _get_member_node_or_error(request, node_type, node_id)
+    if error:
+        return error
+
+    name = (request.data.get('name') or '').strip()
+    if not name:
+        return Response({"message": "name is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    node.name = name
+    node.save()
+    return Response({"status": "ok"}, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def delete_node(request, node_type, node_id):
+    """
+    Delete a Room, Container, or Item. Any member of the owning home may do
+    this. Room/Container deletes clean up descendant Items explicitly first —
+    Item.room/Item.container are SET_NULL (not CASCADE), so left to Django's
+    cascade collector they'd survive as orphans with both fields null.
+    """
+    node, error = _get_member_node_or_error(request, node_type, node_id)
+    if error:
+        return error
+
+    if node_type == 'room':
+        container_ids = get_container_ids_under_room(node)
+        Item.objects.filter(Q(room=node) | Q(container_id__in=container_ids)).delete()
+    elif node_type == 'container':
+        container_ids = get_container_subtree_ids(node)
+        Item.objects.filter(container_id__in=container_ids).delete()
+    # item: a leaf, no descendant cleanup needed.
+
+    node.delete()
+    return Response({"status": "ok"}, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def update_item(request, item_id):
+    """
+    Partially update an Item: only fields present in the request body are
+    touched (the frontend edits one field at a time from the detail page),
+    everything else on the item is left untouched. Any member of the owning
+    home may do this.
+    """
+    item, error = _get_member_node_or_error(request, 'item', item_id)
+    if error:
+        return error
+
+    data = request.data
+
+    if 'name' in data:
+        name = (data.get('name') or '').strip()
+        if not name:
+            return Response({"message": "name is required."}, status=status.HTTP_400_BAD_REQUEST)
+        item.name = name
+    if 'description' in data:
+        item.description = data.get('description') or None
+    if 'quantity' in data:
+        new_quantity = data.get('quantity') or 1
+        checked_out = sum(item.checkouts.values_list('quantity', flat=True))
+        if new_quantity < checked_out:
+            return Response(
+                {"message": f"Cannot set quantity below the {checked_out} already checked out."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        item.quantity = new_quantity
+    if 'category' in data:
+        item.category = data.get('category') or None
+    if 'expiration_date' in data:
+        item.expiration_date = data.get('expiration_date') or None
+    if 'comment' in data:
+        item.comment = data.get('comment') or None
+    if 'tags' in data:
+        item.tags = data.get('tags') or None
+    if 'picture' in data:
+        item.picture = data.get('picture') or None
+
+    item.save()
+
+    return Response(ItemNodeDetailsSerializer(item, context={'request': request}).data, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def checkout_item(request, item_id):
+    """Check out a quantity of an Item for the requesting user. Any member of the owning home may do this."""
+    item, error = _get_member_node_or_error(request, 'item', item_id)
+    if error:
+        return error
+
+    try:
+        quantity = int(request.data.get('quantity'))
+    except (TypeError, ValueError):
+        return Response({"message": "quantity is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    if quantity <= 0:
+        return Response({"message": "quantity must be greater than 0."}, status=status.HTTP_400_BAD_REQUEST)
+
+    checked_out = sum(item.checkouts.values_list('quantity', flat=True))
+    available = item.quantity - checked_out
+    if quantity > available:
+        return Response({"message": f"Only {available} available to check out."}, status=status.HTTP_400_BAD_REQUEST)
+
+    checkout, created = ItemCheckout.objects.get_or_create(item=item, user=request.user, defaults={'quantity': quantity})
+    if not created:
+        checkout.quantity += quantity
+        checkout.save()
+
+    return Response(ItemNodeDetailsSerializer(item, context={'request': request}).data, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def return_item_checkout(request, item_id):
+    """
+    Return some or all of a checked-out quantity, adding it back to the
+    item's available quantity. A user may return their own checkout; the
+    home's creator may return anyone's.
+    """
+    item, error = _get_member_node_or_error(request, 'item', item_id)
+    if error:
+        return error
+
+    user_id = request.data.get('user_id') or request.user.id
+
+    if str(user_id) != str(request.user.id):
+        home_id = get_home_id_for_item(item)
+        home = Home.objects.filter(pk=home_id).first() if home_id else None
+        if not home or home.created_by_id != request.user.id:
+            return Response(
+                {"message": "Only the checkout owner or the home's creator can return this."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+    try:
+        quantity = int(request.data.get('quantity'))
+    except (TypeError, ValueError):
+        return Response({"message": "quantity is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    if quantity <= 0:
+        return Response({"message": "quantity must be greater than 0."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        checkout = ItemCheckout.objects.get(item=item, user_id=user_id)
+    except ItemCheckout.DoesNotExist:
+        return Response({"message": "No checked-out quantity found for that user."}, status=status.HTTP_404_NOT_FOUND)
+
+    if quantity > checkout.quantity:
+        return Response({"message": f"Only {checkout.quantity} checked out."}, status=status.HTTP_400_BAD_REQUEST)
+
+    if quantity == checkout.quantity:
+        checkout.delete()
+    else:
+        checkout.quantity -= quantity
+        checkout.save()
+
+    return Response(ItemNodeDetailsSerializer(item, context={'request': request}).data, status=status.HTTP_200_OK)
 
 
 @api_view(['GET'])
@@ -1004,24 +1374,136 @@ def set_primary_home(request):
 
 
 @api_view(['GET'])
-def get_places_tab(request, home_id):
+def get_homes(request):
+    """Return every Home the authenticated user is a member of."""
+    memberships = [m.home for m in HomeMembership.objects.filter(user=request.user)]
+    homes = HomeSerializer(memberships, context={'user': request.user}, many=True)
+    return Response({"homes": homes.data}, status=status.HTTP_200_OK)
+
+
+def _get_creator_home_or_error(request, home_id):
+    """
+    Look up a Home by id and confirm the requester is its creator.
+    Returns (home, None) on success, or (None, error_response) otherwise.
+    """
     try:
         home = Home.objects.get(pk=home_id)
-        home_details = HomeSerializer(home, context={'user': request.user})
-
-        memberships = [m.home for m in HomeMembership.objects.filter(user=request.user)]
-        homes = HomeSerializer(memberships, context={'user': request.user}, many=True)
-        rooms = RoomSerializer(Room.objects.filter(home=home), many=True)
     except ObjectDoesNotExist:
-        return Response(
-            {"message": f"Home with id {home_id} not found"},
-            status=status.HTTP_404_NOT_FOUND
+        return None, Response(
+            {"message": f"Home with id {home_id} not found."},
+            status=status.HTTP_404_NOT_FOUND,
         )
 
-    ret = {
-        "home_details": home_details.data,
-        "rooms": rooms.data,
-        "homes": homes.data
-    }
+    if home.created_by_id != request.user.id:
+        return None, Response(
+            {"message": "Only the home's creator can do this."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
 
-    return Response(ret, status=status.HTTP_200_OK)
+    return home, None
+
+
+@api_view(['POST'])
+def rename_home(request, home_id):
+    home, error = _get_creator_home_or_error(request, home_id)
+    if error:
+        return error
+
+    name = (request.data.get('name') or '').strip()
+    if not name:
+        return Response({"message": "name is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    home.name = name
+    home.save()
+    return Response(HomeSerializer(home, context={'user': request.user}).data, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def update_home_address(request, home_id):
+    home, error = _get_creator_home_or_error(request, home_id)
+    if error:
+        return error
+
+    home.address = request.data.get('address') or None
+    home.save()
+    return Response(HomeSerializer(home, context={'user': request.user}).data, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def delete_home(request, home_id):
+    home, error = _get_creator_home_or_error(request, home_id)
+    if error:
+        return error
+
+    # Room/Container cascade-delete when their Home/Room is deleted, but
+    # Item.room/Item.container are SET_NULL — left to Django's cascade
+    # collector, items would survive as orphans with both fields null,
+    # violating Item.clean()'s "must belong to room or container" invariant.
+    # Delete them explicitly first. Containers can be nested up to 5 levels,
+    # so a plain `container__room__home` match only catches level-1 containers
+    # — walk the full subtree to also catch items nested deeper.
+    container_ids = get_container_ids_for_home(home)
+    Item.objects.filter(Q(room__home=home) | Q(container_id__in=container_ids)).delete()
+    home.delete()
+
+    return Response({"status": "ok"}, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def share_home(request, home_id):
+    home, error = _get_creator_home_or_error(request, home_id)
+    if error:
+        return error
+
+    username = (request.data.get('username') or '').strip()
+    if not username:
+        return Response({"message": "username is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    target_user = CustomUser.objects.filter(username__iexact=username).first()
+    if not target_user:
+        return Response({"message": f"No user with username '{username}'."}, status=status.HTTP_404_NOT_FOUND)
+
+    if HomeMembership.objects.filter(user=target_user, home=home).exists():
+        return Response(
+            {"message": f"{target_user.username} is already a member of this home."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    HomeMembership.objects.create(user=target_user, home=home)
+    return Response({"status": "ok"}, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+def get_home_members(request, home_id):
+    home, error = _get_creator_home_or_error(request, home_id)
+    if error:
+        return error
+
+    members = [
+        {"id": m.user.id, "username": m.user.username}
+        for m in HomeMembership.objects.filter(home=home).select_related('user')
+    ]
+    return Response({"members": members}, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def remove_home_member(request, home_id):
+    home, error = _get_creator_home_or_error(request, home_id)
+    if error:
+        return error
+
+    user_id = request.data.get('user_id')
+    if not user_id:
+        return Response({"message": "user_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    if str(user_id) == str(home.created_by_id):
+        return Response(
+            {"message": "The creator cannot be removed. Delete the home instead."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    deleted, _ = HomeMembership.objects.filter(home=home, user_id=user_id).delete()
+    if not deleted:
+        return Response({"message": "That user is not a member of this home."}, status=status.HTTP_404_NOT_FOUND)
+
+    return Response({"status": "ok"}, status=status.HTTP_200_OK)
