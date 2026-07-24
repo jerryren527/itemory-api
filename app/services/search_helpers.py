@@ -5,6 +5,36 @@ def get_home_ids_for_user(user):
     return set(HomeMembership.objects.filter(user=user).values_list('home_id', flat=True))
 
 
+def get_container_ids_for_home(home):
+    """All Container ids (any nesting level, 1-5) that live under `home`."""
+    seed_ids = set(Container.objects.filter(room__home=home).values_list('id', flat=True))
+    home_by_container = {cid: (home.id, home.name) for cid in seed_ids}
+    return _expand_container_subtree(seed_ids, home_by_container)
+
+
+def get_container_ids_under_room(room):
+    """All Container ids (any nesting level) that live directly or indirectly under `room`."""
+    seed_ids = set(Container.objects.filter(room=room).values_list('id', flat=True))
+    placeholder = {cid: None for cid in seed_ids}
+    return _expand_container_subtree(seed_ids, placeholder)
+
+
+def get_container_subtree_ids(container):
+    """`container`'s own id plus every descendant container id."""
+    placeholder = {container.id: None}
+    return _expand_container_subtree({container.id}, placeholder)
+
+
+def get_home_id_for_item(item):
+    """The home_id an Item belongs to, via its room (direct or via container)."""
+    if item.room_id:
+        return item.room.home_id
+    if item.container_id:
+        home_tag = resolve_container_home(item.container)
+        return home_tag[0] if home_tag else None
+    return None
+
+
 def _expand_container_subtree(seed_ids, home_by_container):
     """
     BFS down Container.parent_container_id starting from seed_ids (already
@@ -29,7 +59,7 @@ def _expand_container_subtree(seed_ids, home_by_container):
     return all_ids
 
 
-def _resolve_container_home(container):
+def resolve_container_home(container):
     """Walk up the parent_container chain (bounded by max level=5) to find the owning (home_id, home_name)."""
     node = container
     for _ in range(6):
@@ -134,7 +164,7 @@ def resolve_search_scope(user, scope, origin_type, origin_id):
             origin_container = Container.objects.get(pk=origin_id)
         except Container.DoesNotExist:
             raise ValueError('not_found')
-        home_tag = _resolve_container_home(origin_container)
+        home_tag = resolve_container_home(origin_container)
         if home_tag is None or home_tag[0] not in user_home_ids:
             raise ValueError('not_found')
         home_by_container = {origin_id: home_tag}

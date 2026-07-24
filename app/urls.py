@@ -1,5 +1,5 @@
 from django.urls import path, include
-from .views import google_sign_in, google_link, google_unlink, apple_sign_in, apple_confirm, apple_link, apple_unlink, email_sign_in, check_email, register, verify_email, login, test_view, send_reset_password_email, reset_password, me, get_node, get_places_tab, set_password, remove_password, create_home, set_primary_home, search_nodes
+from .views import google_sign_in, google_link, google_unlink, apple_sign_in, apple_confirm, apple_link, apple_unlink, email_sign_in, check_email, register, verify_email, login, test_view, send_reset_password_email, reset_password, me, get_node, get_homes, set_password, remove_password, update_username, create_home, set_primary_home, search_nodes, rename_home, update_home_address, delete_home, share_home, get_home_members, remove_home_member, create_room, create_container, create_item, rename_node, delete_node, update_item, checkout_item, return_item_checkout
 
 app_name = "app"
 urlpatterns = [
@@ -29,6 +29,7 @@ urlpatterns = [
     # Paths for reset password
     path('password/set', set_password, name="set-password"),
     path('password/remove', remove_password, name="remove-password"),
+    path('username', update_username, name="update-username"),
 
     path('send-reset-password-email', send_reset_password_email,
          name="send-reset-password-email"),
@@ -36,9 +37,11 @@ urlpatterns = [
 
     # Endpoint for NodeDetail
     path('place-node/<str:node_type>/<int:node_id>', get_node, name="get-node"),
+    path('place-node/<str:node_type>/<int:node_id>/rename', rename_node, name="rename-node"),
+    path('place-node/<str:node_type>/<int:node_id>/delete', delete_node, name="delete-node"),
 
-    # Endpoint for Places Tab
-    path('places-tab/<int:home_id>', get_places_tab, name='get-places-tab'),
+    # Endpoint for the Homes list
+    path('homes', get_homes, name='get-homes'),
 
     # Endpoint for Search
     path('search', search_nodes, name='search-nodes'),
@@ -46,4 +49,20 @@ urlpatterns = [
     # Endpoints for Home creation and primary home selection
     path('create-home', create_home, name='create-home'),
     path('set-primary-home', set_primary_home, name='set-primary-home'),
+
+    # Endpoints for Home management (creator-only)
+    path('home/<int:home_id>/rename', rename_home, name='rename-home'),
+    path('home/<int:home_id>/address', update_home_address, name='update-home-address'),
+    path('home/<int:home_id>/delete', delete_home, name='delete-home'),
+    path('home/<int:home_id>/share', share_home, name='share-home'),
+    path('home/<int:home_id>/members', get_home_members, name='get-home-members'),
+    path('home/<int:home_id>/remove-member', remove_home_member, name='remove-home-member'),
+
+    # Endpoints for creating Rooms/Containers/Items
+    path('room', create_room, name='create-room'),
+    path('container', create_container, name='create-container'),
+    path('item', create_item, name='create-item'),
+    path('item/<int:item_id>/update', update_item, name='update-item'),
+    path('item/<int:item_id>/checkout', checkout_item, name='checkout-item'),
+    path('item/<int:item_id>/return', return_item_checkout, name='return-item-checkout'),
 ]

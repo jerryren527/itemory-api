@@ -401,6 +401,7 @@ class RegisterTests(APITestCase):
         data = {
             "email": "testuser@example.com",
             "password": "StrongPassword123!",
+            "username": "testuser",
         }
 
         response = self.client.post(url, data, format="json")
@@ -480,19 +481,25 @@ class RegisterTests(APITestCase):
 
     def test_email_stored_lowercase(self):
         url = reverse("app:register")
-        self.client.post(url, {"email": "TestUser@Example.COM", "password": "StrongPassword123!"}, format="json")
+        self.client.post(
+            url, {"email": "TestUser@Example.COM", "password": "StrongPassword123!", "username": "testuser"},
+            format="json")
         user = User.objects.first()
         self.assertEqual(user.email, "testuser@example.com")
 
     def test_has_password_set_after_registration(self):
         url = reverse("app:register")
-        self.client.post(url, {"email": "testuser@example.com", "password": "StrongPassword123!"}, format="json")
+        self.client.post(
+            url, {"email": "testuser@example.com", "password": "StrongPassword123!", "username": "testuser"},
+            format="json")
         user = User.objects.first()
         self.assertTrue(user.has_password)
 
     def test_email_not_verified_before_clicking_link(self):
         url = reverse("app:register")
-        self.client.post(url, {"email": "testuser@example.com", "password": "StrongPassword123!"}, format="json")
+        self.client.post(
+            url, {"email": "testuser@example.com", "password": "StrongPassword123!", "username": "testuser"},
+            format="json")
         user = User.objects.first()
         self.assertFalse(user.email_verified)
 
