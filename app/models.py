@@ -11,6 +11,10 @@ from .managers import CustomUserManager
 
 class CustomUser(AbstractBaseUser, PermissionsMixin):
     email = models.EmailField(unique=True)
+    # Public, shareable identifier used for Home-sharing. Unlike email (which
+    # can be an opaque Apple private-relay address), this is always safe to
+    # type into a UI and safe to look up.
+    username = models.CharField(max_length=30, unique=True, null=True, blank=True)
 
     # Authentication
     has_password = models.BooleanField(default=False)
@@ -143,11 +147,6 @@ class Item(models.Model):
         ('kitchen', 'Kitchen'),
     ]
 
-    STATUS_CHOICES = [
-        ('in_use', 'In-Use'),
-        ('stored', 'Stored')
-    ]
-
     name = models.CharField(max_length=255)
     description = models.TextField(max_length=1000, blank=True, null=True)
     room = models.ForeignKey(
@@ -160,8 +159,6 @@ class Item(models.Model):
     category = models.CharField(
         max_length=20, choices=CATEGORY_CHOICES, blank=True, null=True)
     expiration_date = models.DateField(blank=True, null=True)
-    status = models.CharField(
-        max_length=20, choices=STATUS_CHOICES, default="stored")
     quantity = models.PositiveIntegerField(default=1)
     created_by = models.ForeignKey(
         CustomUser, on_delete=models.SET_NULL, null=True)
@@ -189,3 +186,21 @@ class Item(models.Model):
         """
         self.full_clean()
         super().save(*args, **kwargs)
+
+
+class ItemCheckout(models.Model):
+    """
+    How much of an Item's quantity a given user currently has checked out.
+    One row per (item, user); checking out more adds to the existing row,
+    returning subtracts and deletes the row once it reaches zero.
+    """
+    item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name="checkouts")
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name="item_checkouts")
+    quantity = models.PositiveIntegerField()
+    checked_out_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("item", "user")
+
+    def __str__(self):
+        return f"{self.user.username} - {self.item.name} x{self.quantity}"

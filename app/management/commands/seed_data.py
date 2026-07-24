@@ -16,12 +16,21 @@ class Command(BaseCommand):
         # ---- USERS ----
         alice, created = User.objects.get_or_create(
             email="alice@example.com",
-            defaults={"email_verified": True},
+            defaults={"email_verified": True, "username": "alice"},
         )
         if created:
             alice.set_password("Password123!")
             alice.has_password = True
             alice.save()
+
+        bob, created = User.objects.get_or_create(
+            email="bob@example.com",
+            defaults={"email_verified": True, "username": "bob"},
+        )
+        if created:
+            bob.set_password("Password123!")
+            bob.has_password = True
+            bob.save()
 
         # ---- HOME ----
         apt1 = Home.objects.create(
@@ -38,6 +47,9 @@ class Command(BaseCommand):
 
         alice.primary_home = apt1
         alice.save()
+
+        bob.primary_home = home1
+        bob.save()
 
         # ---- ROOM ----
         living_room1 = Room.objects.create(
@@ -367,6 +379,7 @@ class Command(BaseCommand):
         HomeMembership.objects.bulk_create([
             HomeMembership(user=alice, home=apt1),
             HomeMembership(user=alice, home=home1),
+            HomeMembership(user=bob, home=home1),
         ])
 
         self.stdout.write(self.style.SUCCESS(
