@@ -1011,6 +1011,14 @@ def create_container(request):
     return Response({"status": "ok", "id": container.id}, status=status.HTTP_201_CREATED)
 
 
+def _duplicate_item_name(name, room=None, container=None, exclude_id=None):
+    """Whether another Item with this name already lives in the same room/container."""
+    qs = Item.objects.filter(name=name, room=room) if room else Item.objects.filter(name=name, container=container)
+    if exclude_id is not None:
+        qs = qs.exclude(pk=exclude_id)
+    return qs.exists()
+
+
 @api_view(['POST'])
 def create_item(request):
     """Create an Item under a Room or a Container. Any member of the owning home may do this."""
@@ -1047,6 +1055,11 @@ def create_item(request):
 
     if not home_id or not HomeMembership.objects.filter(user=request.user, home_id=home_id).exists():
         return Response({"message": "Parent not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if _duplicate_item_name(name, **create_kwargs):
+        return Response(
+            {"message": f'An item named "{name}" already exists here.'}, status=status.HTTP_400_BAD_REQUEST
+        )
 
     item = Item.objects.create(
         name=name,
@@ -1110,6 +1123,11 @@ def rename_node(request, node_type, node_id):
     if not name:
         return Response({"message": "name is required."}, status=status.HTTP_400_BAD_REQUEST)
 
+    if node_type == 'item' and _duplicate_item_name(name, room=node.room, container=node.container, exclude_id=node.id):
+        return Response(
+            {"message": f'An item named "{name}" already exists here.'}, status=status.HTTP_400_BAD_REQUEST
+        )
+
     node.name = name
     node.save()
     return Response({"status": "ok"}, status=status.HTTP_200_OK)
@@ -1157,6 +1175,10 @@ def update_item(request, item_id):
         name = (data.get('name') or '').strip()
         if not name:
             return Response({"message": "name is required."}, status=status.HTTP_400_BAD_REQUEST)
+        if _duplicate_item_name(name, room=item.room, container=item.container, exclude_id=item.id):
+            return Response(
+                {"message": f'An item named "{name}" already exists here.'}, status=status.HTTP_400_BAD_REQUEST
+            )
         item.name = name
     if 'description' in data:
         item.description = data.get('description') or None

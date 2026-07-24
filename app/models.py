@@ -169,6 +169,23 @@ class Item(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        constraints = [
+            # An item's name must be unique among its siblings within the same
+            # room or container. Partial (condition=...) because room/container
+            # are mutually exclusive nullable FKs, and NULL != NULL for
+            # uniqueness purposes, so a plain unique_together would only ever
+            # enforce this for the FK that happens to be set.
+            models.UniqueConstraint(
+                fields=["name", "room"], condition=models.Q(room__isnull=False), name="unique_item_name_per_room"
+            ),
+            models.UniqueConstraint(
+                fields=["name", "container"],
+                condition=models.Q(container__isnull=False),
+                name="unique_item_name_per_container",
+            ),
+        ]
+
     def __str__(self):
         return f"({self.id}): {self.name}"
 

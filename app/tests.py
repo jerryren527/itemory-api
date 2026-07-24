@@ -853,3 +853,76 @@ class SearchNodesTests(APITestCase):
             "q": "kitchen", "scope": "folder", "origin_type": "container", "origin_id": foreign_container.id,
         })
         self.assertEqual(response.status_code, 404)
+
+
+class ItemUniqueNameTests(APITestCase):
+    """
+    Item names must be unique among siblings in the same room/container, but
+    the same name is allowed to repeat in a different room/container.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="itemowner@example.com",
+            password="Pass123!",
+            email_verified=True,
+        )
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {refresh.access_token}")
+
+        self.home = Home.objects.create(name="My Home", created_by=self.user)
+        HomeMembership.objects.create(user=self.user, home=self.home)
+
+        self.room = Room.objects.create(name="Kitchen", home=self.home, created_by=self.user)
+        self.other_room = Room.objects.create(name="Garage", home=self.home, created_by=self.user)
+        self.container = Container.objects.create(
+            name="Cabinet", room=self.room, level=1, created_by=self.user,
+        )
+
+        self.room_item = Item.objects.create(name="Blender", room=self.room, created_by=self.user)
+        self.container_item = Item.objects.create(name="Mug", container=self.container, created_by=self.user)
+
+    # --- create_item ---
+
+    def test_create_item_duplicate_name_in_same_room_returns_400(self):
+        response = self.client.post(
+            reverse("app:create-item"), {"name": "Blender", "room_id": self.room.id}, format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Item.objects.filter(room=self.room, name="Blender").count() > 1)
+
+    def test_create_item_duplicate_name_in_same_container_returns_400(self):
+        response = self.client.post(
+            reverse("app:create-item"), {"name": "Mug", "container_id": self.container.id}, format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_create_item_same_name_in_different_room_is_allowed(self):
+        response = self.client.post(
+            reverse("app:create-item"), {"name": "Blender", "room_id": self.other_room.id}, format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+
+    # --- rename_node ---
+
+    def test_rename_item_to_duplicate_name_in_same_room_returns_400(self):
+        other_item = Item.objects.create(name="Toaster", room=self.room, created_by=self.user)
+        response = self.client.post(
+            reverse("app:rename-node", args=["item", other_item.id]), {"name": "Blender"}, format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_rename_item_to_its_own_current_name_is_allowed(self):
+        response = self.client.post(
+            reverse("app:rename-node", args=["item", self.room_item.id]), {"name": "Blender"}, format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+    # --- update_item ---
+
+    def test_update_item_name_to_duplicate_in_same_container_returns_400(self):
+        other_item = Item.objects.create(name="Plate", container=self.container, created_by=self.user)
+        response = self.client.post(
+            reverse("app:update-item", args=[other_item.id]), {"name": "Mug"}, format="json",
+        )
+        self.assertEqual(response.status_code, 400)
