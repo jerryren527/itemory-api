@@ -35,7 +35,7 @@ from .services.search_helpers import (
 from .services.username_helpers import generate_unique_username
 
 from .models import CustomUser, PasswordResetToken, Room, Container, Item, ItemCheckout, Home, HomeMembership
-from .serializers import RegisterSerializer, IdentifySerializer, LoginSerializer, ResetPasswordSerializer, SetPasswordSerializer, ChildSerializer, NodeDetailsSerializer, ItemNodeDetailsSerializer, HomeSerializer, SearchResultSerializer
+from .serializers import RegisterSerializer, IdentifySerializer, LoginSerializer, ResetPasswordSerializer, SetPasswordSerializer, ChildSerializer, NodeDetailsSerializer, ItemNodeDetailsSerializer, HomeSerializer, SearchResultSerializer, CheckedOutItemSerializer
 from django.core.exceptions import ObjectDoesNotExist
 
 
@@ -1345,6 +1345,28 @@ def search_nodes(request):
         {"query": q, "scope": scope, "results": serialized.data},
         status=status.HTTP_200_OK
     )
+
+
+@api_view(['GET'])
+def checked_out_items(request):
+    """All items the requesting user currently has checked out, across every home they belong to."""
+    checkouts = ItemCheckout.objects.filter(user=request.user).select_related(
+        'item', 'item__room__home', 'item__container'
+    )
+
+    items = []
+    for checkout in checkouts:
+        item = checkout.item
+        item.checked_out_quantity = checkout.quantity
+        if item.room_id:
+            item.home_id, item.home_name = item.room.home_id, item.room.home.name
+        else:
+            item.home_id, item.home_name = resolve_container_home(item.container)
+        items.append(item)
+
+    serialized = CheckedOutItemSerializer(items, many=True)
+
+    return Response({"results": serialized.data}, status=status.HTTP_200_OK)
 
 
 @api_view(['POST'])

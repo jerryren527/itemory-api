@@ -225,6 +225,18 @@ class SearchResultSerializer(ChildSerializer):
     home_name = serializers.CharField()
 
 
+class CheckedOutItemSerializer(SearchResultSerializer):
+    """
+    An item the requesting user has checked out, tagged with the home it
+    lives in (see SearchResultSerializer) plus the quantity *this user* has
+    checked out (checked_out_quantity is attached as an ad hoc attribute on
+    the raw Item instance before serializing - see checked_out_items).
+    """
+
+    def get_quantity(self, obj):
+        return obj.checked_out_quantity
+
+
 class ItemNodeDetailsSerializer(serializers.Serializer):
     name = serializers.CharField()
     description = serializers.CharField(allow_null=True)
