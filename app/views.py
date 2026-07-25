@@ -31,11 +31,12 @@ from .services.search_helpers import (
     get_container_ids_under_room,
     get_container_subtree_ids,
     get_home_id_for_item,
+    get_home_ids_for_user,
 )
 from .services.username_helpers import generate_unique_username
 
-from .models import CustomUser, PasswordResetToken, Room, Container, Item, ItemCheckout, Home, HomeMembership
-from .serializers import RegisterSerializer, IdentifySerializer, LoginSerializer, ResetPasswordSerializer, SetPasswordSerializer, ChildSerializer, NodeDetailsSerializer, ItemNodeDetailsSerializer, HomeSerializer, SearchResultSerializer, CheckedOutItemSerializer
+from .models import CustomUser, PasswordResetToken, Room, Container, Item, ItemCheckout, Home, HomeMembership, StarredRoom, StarredContainer, StarredItem
+from .serializers import RegisterSerializer, IdentifySerializer, LoginSerializer, ResetPasswordSerializer, SetPasswordSerializer, ChildSerializer, NodeDetailsSerializer, ItemNodeDetailsSerializer, HomeSerializer, SearchResultSerializer, CheckedOutItemSerializer, StarredNodeSerializer
 from django.core.exceptions import ObjectDoesNotExist
 
 
@@ -921,14 +922,21 @@ def get_node(request, node_type, node_id):
 
     # Looks at the node instance, finds its name attribute, and produces this JSON shape: { "name": "kitchen" }
     if node_type == 'item':
-        node_details = ItemNodeDetailsSerializer(node, context={'request': request})
+        is_starred = request.user.is_authenticated and StarredItem.objects.filter(user=request.user, item=node).exists()
+        node_details = ItemNodeDetailsSerializer(node, context={'request': request, 'is_starred': is_starred})
     elif node_type == 'home':
         node_details = HomeSerializer(node, context={'user': request.user})
     else:
-        node_details = NodeDetailsSerializer(node)
+        is_starred = request.user.is_authenticated and _STAR_MODEL_BY_TYPE[node_type].objects.filter(
+            user=request.user, **{node_type: node}
+        ).exists()
+        node_details = NodeDetailsSerializer(node, context={'is_starred': is_starred})
+
     # Looks at the node instances, extracts the fields declared in ChildSerializer, returns the JSON.
     # DRF needs many=True when serializing multiple objects.
-    children = ChildSerializer(determine_children(node), many=True)
+    children_list = determine_children(node)
+    starred_keys = get_starred_keys(request.user, children_list) if request.user.is_authenticated else set()
+    children = ChildSerializer(children_list, many=True, context={'starred_keys': starred_keys})
 
     return Response(
         {
@@ -1112,6 +1120,36 @@ def _get_member_node_or_error(request, node_type, node_id):
     return node, None
 
 
+_STAR_MODEL_BY_TYPE = {'room': StarredRoom, 'container': StarredContainer, 'item': StarredItem}
+
+
+def get_starred_keys(user, nodes):
+    """
+    Which of `nodes` (a mixed list of raw Room/Container/Item instances) the
+    user has starred. Returns a set of (type_str, id) tuples, batched into
+    one query per node_type rather than one query per node to avoid N+1s
+    when serializing a children/search list.
+    """
+    room_ids = [n.id for n in nodes if isinstance(n, Room)]
+    container_ids = [n.id for n in nodes if isinstance(n, Container)]
+    item_ids = [n.id for n in nodes if isinstance(n, Item)]
+
+    keys = set()
+    keys |= {
+        ('room', i) for i in StarredRoom.objects.filter(user=user, room_id__in=room_ids).values_list('room_id', flat=True)
+    }
+    keys |= {
+        ('container', i)
+        for i in StarredContainer.objects.filter(user=user, container_id__in=container_ids).values_list(
+            'container_id', flat=True
+        )
+    }
+    keys |= {
+        ('item', i) for i in StarredItem.objects.filter(user=user, item_id__in=item_ids).values_list('item_id', flat=True)
+    }
+    return keys
+
+
 @api_view(['POST'])
 def rename_node(request, node_type, node_id):
     """Rename a Room, Container, or Item. Any member of the owning home may do this."""
@@ -1154,6 +1192,28 @@ def delete_node(request, node_type, node_id):
     # item: a leaf, no descendant cleanup needed.
 
     node.delete()
+    return Response({"status": "ok"}, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def star_node(request, node_type, node_id):
+    """Star (favorite) a Room, Container, or Item. Any member of the owning home may do this. Idempotent."""
+    node, error = _get_member_node_or_error(request, node_type, node_id)
+    if error:
+        return error
+
+    _STAR_MODEL_BY_TYPE[node_type].objects.get_or_create(user=request.user, **{node_type: node})
+    return Response({"status": "ok"}, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def unstar_node(request, node_type, node_id):
+    """Unstar a Room, Container, or Item. Any member of the owning home may do this. Idempotent."""
+    node, error = _get_member_node_or_error(request, node_type, node_id)
+    if error:
+        return error
+
+    _STAR_MODEL_BY_TYPE[node_type].objects.filter(user=request.user, **{node_type: node}).delete()
     return Response({"status": "ok"}, status=status.HTTP_200_OK)
 
 
@@ -1339,7 +1399,7 @@ def search_nodes(request):
 
     # Defensive cap, matching the no-pagination style of get_node/get_places_tab.
     results = (rooms + containers + items)[:50]
-    serialized = SearchResultSerializer(results, many=True)
+    serialized = SearchResultSerializer(results, many=True, context={'starred_keys': get_starred_keys(request.user, results)})
 
     return Response(
         {"query": q, "scope": scope, "results": serialized.data},
@@ -1365,6 +1425,48 @@ def checked_out_items(request):
         items.append(item)
 
     serialized = CheckedOutItemSerializer(items, many=True)
+
+    return Response({"results": serialized.data}, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+def starred_nodes(request):
+    """
+    All rooms/containers/items the requesting user has starred, across every
+    home they're currently a member of. Scoped to current membership (rather
+    than trusting the StarredX rows alone) because a star isn't cleaned up if
+    the user's access to that home is later revoked.
+    """
+    user_home_ids = get_home_ids_for_user(request.user)
+    nodes = []
+
+    for starred in StarredRoom.objects.filter(user=request.user, room__home_id__in=user_home_ids).select_related(
+        'room__home'
+    ):
+        room = starred.room
+        room.home_id, room.home_name = room.home_id, room.home.name
+        nodes.append(room)
+
+    for starred in StarredContainer.objects.filter(user=request.user).select_related('container'):
+        container = starred.container
+        home_tag = resolve_container_home(container)
+        if not home_tag or home_tag[0] not in user_home_ids:
+            continue
+        container.home_id, container.home_name = home_tag
+        nodes.append(container)
+
+    for starred in StarredItem.objects.filter(user=request.user).select_related('item__room__home', 'item__container'):
+        item = starred.item
+        home_id = get_home_id_for_item(item)
+        if home_id not in user_home_ids:
+            continue
+        if item.room_id:
+            item.home_id, item.home_name = item.room.home_id, item.room.home.name
+        else:
+            item.home_id, item.home_name = resolve_container_home(item.container)
+        nodes.append(item)
+
+    serialized = StarredNodeSerializer(nodes, many=True)
 
     return Response({"results": serialized.data}, status=status.HTTP_200_OK)
 

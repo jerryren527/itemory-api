@@ -221,3 +221,42 @@ class ItemCheckout(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.item.name} x{self.quantity}"
+
+
+class StarredRoom(models.Model):
+    """A user has starred (favorited) a Room. One row per (room, user)."""
+    room = models.ForeignKey(Room, on_delete=models.CASCADE, related_name="stars")
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name="starred_rooms")
+    starred_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("room", "user")
+
+    def __str__(self):
+        return f"{self.user.username} - {self.room.name}"
+
+
+class StarredContainer(models.Model):
+    """A user has starred (favorited) a Container. One row per (container, user)."""
+    container = models.ForeignKey(Container, on_delete=models.CASCADE, related_name="stars")
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name="starred_containers")
+    starred_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("container", "user")
+
+    def __str__(self):
+        return f"{self.user.username} - {self.container.name}"
+
+
+class StarredItem(models.Model):
+    """A user has starred (favorited) an Item. One row per (item, user)."""
+    item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name="stars")
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name="starred_items")
+    starred_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("item", "user")
+
+    def __str__(self):
+        return f"{self.user.username} - {self.item.name}"

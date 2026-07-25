@@ -178,9 +178,13 @@ class NodeDetailsSerializer(serializers.Serializer):
     description = serializers.CharField(allow_null=True)
     picture = serializers.URLField(allow_null=True)
     level = serializers.SerializerMethodField()
+    is_starred = serializers.SerializerMethodField()
 
     def get_level(self, obj):
         return getattr(obj, 'level', None)
+
+    def get_is_starred(self, obj):
+        return self.context.get('is_starred', False)
 
 
 class ChildSerializer(serializers.Serializer):
@@ -190,6 +194,7 @@ class ChildSerializer(serializers.Serializer):
     thumbnail = serializers.SerializerMethodField()
     quantity = serializers.SerializerMethodField()
     expiration_date = serializers.SerializerMethodField()
+    is_starred = serializers.SerializerMethodField()
 
     def get_type(self, obj):
         if isinstance(obj, Room):
@@ -214,6 +219,14 @@ class ChildSerializer(serializers.Serializer):
             return obj.expiration_date
         return None
 
+    def get_is_starred(self, obj):
+        """
+        starred_keys (a set of (type, id) tuples for the requesting user) is
+        passed via context by the view - see get_starred_keys in views.py.
+        """
+        starred_keys = self.context.get('starred_keys') or set()
+        return (self.get_type(obj), obj.id) in starred_keys
+
 
 class SearchResultSerializer(ChildSerializer):
     """
@@ -237,6 +250,21 @@ class CheckedOutItemSerializer(SearchResultSerializer):
         return obj.checked_out_quantity
 
 
+class StarredNodeSerializer(SearchResultSerializer):
+    """
+    A room/container/item the requesting user has starred, tagged with the
+    home it lives in (home_id/home_name attached as ad hoc attributes on the
+    raw model instance before serializing - see starred_nodes) plus
+    updated_at, a genuine field on Room/Container/Item.
+    """
+    updated_at = serializers.DateTimeField()
+
+    def get_is_starred(self, obj):
+        # Every node in this list is starred by definition - no need to
+        # look up starred_keys (not passed via context here).
+        return True
+
+
 class ItemNodeDetailsSerializer(serializers.Serializer):
     name = serializers.CharField()
     description = serializers.CharField(allow_null=True)
@@ -249,6 +277,10 @@ class ItemNodeDetailsSerializer(serializers.Serializer):
     available_quantity = serializers.SerializerMethodField()
     checkouts = serializers.SerializerMethodField()
     can_manage_checkouts = serializers.SerializerMethodField()
+    is_starred = serializers.SerializerMethodField()
+
+    def get_is_starred(self, obj):
+        return self.context.get('is_starred', False)
 
     def get_available_quantity(self, obj):
         checked_out = sum(c.quantity for c in obj.checkouts.all())
