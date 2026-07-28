@@ -175,3 +175,8 @@ SIMPLE_JWT = {
 }
 
 AUTH_USER_MODEL = "app.CustomUser"
+
+AWS_S3_REGION = env("AWS_S3_REGION", default=None)
+AWS_ACCESS_KEY_ID = env("AWS_ACCESS_KEY_ID", default=None)
+AWS_SECRET_ACCESS_KEY = env("AWS_SECRET_ACCESS_KEY", default=None)
+AWS_S3_BUCKET_NAME = env("AWS_S3_BUCKET_NAME", default=None)

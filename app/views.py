@@ -34,6 +34,7 @@ from .services.search_helpers import (
     get_home_ids_for_user,
 )
 from .services.username_helpers import generate_unique_username
+from .services.photo_helpers import ALLOWED_PHOTO_CONTENT_TYPES, presign_item_photo_upload
 
 from .models import CustomUser, PasswordResetToken, Room, Container, Item, ItemCheckout, Home, HomeMembership, StarredRoom, StarredContainer, StarredItem
 from .serializers import RegisterSerializer, IdentifySerializer, LoginSerializer, ResetPasswordSerializer, SetPasswordSerializer, ChildSerializer, NodeDetailsSerializer, ItemNodeDetailsSerializer, HomeSerializer, SearchResultSerializer, CheckedOutItemSerializer, StarredNodeSerializer
@@ -1265,6 +1266,29 @@ def update_item(request, item_id):
     item.save()
 
     return Response(ItemNodeDetailsSerializer(item, context={'request': request}).data, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def presign_item_photo(request, item_id):
+    """
+    Mint a presigned S3 PUT URL for uploading a photo for an item. Any
+    member of the owning home may do this. The client uploads directly to
+    S3 with the returned URL, then persists `photo_url` via update_item.
+    """
+    item, error = _get_member_node_or_error(request, 'item', item_id)
+    if error:
+        return error
+
+    content_type = request.data.get('content_type')
+    if content_type not in ALLOWED_PHOTO_CONTENT_TYPES:
+        return Response({"message": "Unsupported content type."}, status=status.HTTP_400_BAD_REQUEST)
+
+    upload_url, photo_url, expires_in = presign_item_photo_upload(item.id, content_type)
+
+    return Response(
+        {"upload_url": upload_url, "photo_url": photo_url, "expires_in": expires_in},
+        status=status.HTTP_200_OK,
+    )
 
 
 @api_view(['POST'])
