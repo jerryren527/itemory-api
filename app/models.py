@@ -11,11 +11,16 @@ from .managers import CustomUserManager
 
 class CustomUser(AbstractBaseUser, PermissionsMixin):
     email = models.EmailField(unique=True)
+    # Public, shareable identifier used for Home-sharing. Unlike email (which
+    # can be an opaque Apple private-relay address), this is always safe to
+    # type into a UI and safe to look up.
+    username = models.CharField(max_length=30, unique=True, null=True, blank=True)
 
     # Authentication
     has_password = models.BooleanField(default=False)
     google_account_linked = models.BooleanField(default=False)
     google_sub = models.CharField(max_length=255, null=True, blank=True)
+    google_email = models.EmailField(null=True, blank=True)
     google_picture_url = models.URLField(null=True, blank=True)
     apple_account_linked = models.BooleanField(default=False)
     apple_sub = models.CharField(max_length=255, null=True, blank=True, unique=True)
@@ -142,11 +147,6 @@ class Item(models.Model):
         ('kitchen', 'Kitchen'),
     ]
 
-    STATUS_CHOICES = [
-        ('in_use', 'In-Use'),
-        ('stored', 'Stored')
-    ]
-
     name = models.CharField(max_length=255)
     description = models.TextField(max_length=1000, blank=True, null=True)
     room = models.ForeignKey(
@@ -159,8 +159,6 @@ class Item(models.Model):
     category = models.CharField(
         max_length=20, choices=CATEGORY_CHOICES, blank=True, null=True)
     expiration_date = models.DateField(blank=True, null=True)
-    status = models.CharField(
-        max_length=20, choices=STATUS_CHOICES, default="stored")
     quantity = models.PositiveIntegerField(default=1)
     created_by = models.ForeignKey(
         CustomUser, on_delete=models.SET_NULL, null=True)
@@ -170,6 +168,23 @@ class Item(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            # An item's name must be unique among its siblings within the same
+            # room or container. Partial (condition=...) because room/container
+            # are mutually exclusive nullable FKs, and NULL != NULL for
+            # uniqueness purposes, so a plain unique_together would only ever
+            # enforce this for the FK that happens to be set.
+            models.UniqueConstraint(
+                fields=["name", "room"], condition=models.Q(room__isnull=False), name="unique_item_name_per_room"
+            ),
+            models.UniqueConstraint(
+                fields=["name", "container"],
+                condition=models.Q(container__isnull=False),
+                name="unique_item_name_per_container",
+            ),
+        ]
 
     def __str__(self):
         return f"({self.id}): {self.name}"
@@ -188,3 +203,60 @@ class Item(models.Model):
         """
         self.full_clean()
         super().save(*args, **kwargs)
+
+
+class ItemCheckout(models.Model):
+    """
+    How much of an Item's quantity a given user currently has checked out.
+    One row per (item, user); checking out more adds to the existing row,
+    returning subtracts and deletes the row once it reaches zero.
+    """
+    item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name="checkouts")
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name="item_checkouts")
+    quantity = models.PositiveIntegerField()
+    checked_out_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("item", "user")
+
+    def __str__(self):
+        return f"{self.user.username} - {self.item.name} x{self.quantity}"
+
+
+class StarredRoom(models.Model):
+    """A user has starred (favorited) a Room. One row per (room, user)."""
+    room = models.ForeignKey(Room, on_delete=models.CASCADE, related_name="stars")
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name="starred_rooms")
+    starred_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("room", "user")
+
+    def __str__(self):
+        return f"{self.user.username} - {self.room.name}"
+
+
+class StarredContainer(models.Model):
+    """A user has starred (favorited) a Container. One row per (container, user)."""
+    container = models.ForeignKey(Container, on_delete=models.CASCADE, related_name="stars")
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name="starred_containers")
+    starred_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("container", "user")
+
+    def __str__(self):
+        return f"{self.user.username} - {self.container.name}"
+
+
+class StarredItem(models.Model):
+    """A user has starred (favorited) an Item. One row per (item, user)."""
+    item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name="stars")
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name="starred_items")
+    starred_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("item", "user")
+
+    def __str__(self):
+        return f"{self.user.username} - {self.item.name}"

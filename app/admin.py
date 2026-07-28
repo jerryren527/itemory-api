@@ -10,14 +10,14 @@ class CustomUserAdmin(BaseUserAdmin):
     add_form = CustomUserCreationForm
     form = CustomUserChangeForm
     model = CustomUser
-    list_display = ("email", "is_staff", "is_superuser",
+    list_display = ("email", "username", "is_staff", "is_superuser",
                     "google_account_linked", "has_password", "email_verified")
     list_filter = ("is_staff", "is_superuser", "google_account_linked")
 
     fieldsets = (
-        (None, {"fields": ("email", "password", "primary_home")}),
+        (None, {"fields": ("email", "username", "password", "primary_home")}),
         ("Authentication", {"fields": (
-            "has_password", "google_account_linked", "google_sub", "google_picture_url", "apple_account_linked", "apple_sub", )}),
+            "has_password", "google_account_linked", "google_sub", "google_email", "google_picture_url", "apple_account_linked", "apple_sub", )}),
         ("Permissions", {"fields": ("is_staff",
          "is_superuser", "groups", "user_permissions")}),
         ("Important dates", {"fields": (
@@ -38,7 +38,7 @@ class CustomUserAdmin(BaseUserAdmin):
         ),
     )
 
-    search_fields = ("email", "google_sub")
+    search_fields = ("email", "username", "google_sub")
     ordering = ("email",)
 
 
