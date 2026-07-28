@@ -1,4 +1,5 @@
 import uuid
+from urllib.parse import urlparse
 
 import boto3
 from django.conf import settings
@@ -39,3 +40,17 @@ def presign_item_photo_upload(item_id, content_type):
     photo_url = f"https://{settings.AWS_S3_BUCKET_NAME}.s3.{settings.AWS_S3_REGION}.amazonaws.com/{key}"
 
     return upload_url, photo_url, PHOTO_UPLOAD_EXPIRES_IN
+
+
+def delete_item_photo(photo_url):
+    """
+    Delete the S3 object backing an item photo URL previously returned by
+    `presign_item_photo_upload`. No-ops (rather than raising) if the URL
+    doesn't point at our bucket, so callers can pass any stored `picture`
+    value safely.
+    """
+    key = urlparse(photo_url).path.lstrip('/')
+    if not key:
+        return
+
+    _s3_client().delete_object(Bucket=settings.AWS_S3_BUCKET_NAME, Key=key)

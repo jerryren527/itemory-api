@@ -34,7 +34,7 @@ from .services.search_helpers import (
     get_home_ids_for_user,
 )
 from .services.username_helpers import generate_unique_username
-from .services.photo_helpers import ALLOWED_PHOTO_CONTENT_TYPES, presign_item_photo_upload
+from .services.photo_helpers import ALLOWED_PHOTO_CONTENT_TYPES, delete_item_photo, presign_item_photo_upload
 
 from .models import CustomUser, PasswordResetToken, Room, Container, Item, ItemCheckout, Home, HomeMembership, StarredRoom, StarredContainer, StarredItem
 from .serializers import RegisterSerializer, IdentifySerializer, LoginSerializer, ResetPasswordSerializer, SetPasswordSerializer, ChildSerializer, NodeDetailsSerializer, ItemNodeDetailsSerializer, HomeSerializer, SearchResultSerializer, CheckedOutItemSerializer, StarredNodeSerializer
@@ -1186,11 +1186,20 @@ def delete_node(request, node_type, node_id):
 
     if node_type == 'room':
         container_ids = get_container_ids_under_room(node)
-        Item.objects.filter(Q(room=node) | Q(container_id__in=container_ids)).delete()
+        items = Item.objects.filter(Q(room=node) | Q(container_id__in=container_ids))
+        for picture in items.values_list('picture', flat=True):
+            if picture:
+                delete_item_photo(picture)
+        items.delete()
     elif node_type == 'container':
         container_ids = get_container_subtree_ids(node)
-        Item.objects.filter(container_id__in=container_ids).delete()
-    # item: a leaf, no descendant cleanup needed.
+        items = Item.objects.filter(container_id__in=container_ids)
+        for picture in items.values_list('picture', flat=True):
+            if picture:
+                delete_item_photo(picture)
+        items.delete()
+    elif node.picture:  # item: a leaf, no descendant cleanup needed.
+        delete_item_photo(node.picture)
 
     node.delete()
     return Response({"status": "ok"}, status=status.HTTP_200_OK)
@@ -1261,7 +1270,10 @@ def update_item(request, item_id):
     if 'tags' in data:
         item.tags = data.get('tags') or None
     if 'picture' in data:
-        item.picture = data.get('picture') or None
+        new_picture = data.get('picture') or None
+        if item.picture and item.picture != new_picture:
+            delete_item_photo(item.picture)
+        item.picture = new_picture
 
     item.save()
 
@@ -1289,6 +1301,24 @@ def presign_item_photo(request, item_id):
         {"upload_url": upload_url, "photo_url": photo_url, "expires_in": expires_in},
         status=status.HTTP_200_OK,
     )
+
+
+@api_view(['POST'])
+def delete_item_photo_view(request, item_id):
+    """
+    Delete the item's current photo, both from S3 and from the item record.
+    Any member of the owning home may do this.
+    """
+    item, error = _get_member_node_or_error(request, 'item', item_id)
+    if error:
+        return error
+
+    if item.picture:
+        delete_item_photo(item.picture)
+        item.picture = None
+        item.save()
+
+    return Response(ItemNodeDetailsSerializer(item, context={'request': request}).data, status=status.HTTP_200_OK)
 
 
 @api_view(['POST'])
