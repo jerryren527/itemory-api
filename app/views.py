@@ -96,10 +96,14 @@ def login(request):
         serializer = LoginSerializer(data=request.data)
 
         if serializer.is_valid():
-            email = serializer.validated_data['email'].lower()
+            identifier = serializer.validated_data['identifier'].strip().lower()
             password = serializer.validated_data['password']
 
-            user = authenticate(email=email, password=password)
+            matched_user = CustomUser.objects.filter(
+                Q(email__iexact=identifier) | Q(username__iexact=identifier)
+            ).first()
+
+            user = authenticate(email=matched_user.email, password=password) if matched_user else None
 
             if user and user.email_verified:
                 refresh = RefreshToken.for_user(user)
@@ -121,7 +125,7 @@ def login(request):
             elif user:
                 return Response({'message': 'Email address is not verified yet.'}, status=status.HTTP_401_UNAUTHORIZED)
             else:
-                return Response({'message': 'Email or password is incorrect.'}, status=status.HTTP_401_UNAUTHORIZED)
+                return Response({'message': 'Email/username or password is incorrect.'}, status=status.HTTP_401_UNAUTHORIZED)
 
         else:
             return Response(serializer.errors, status=status.HTTP_401_UNAUTHORIZED)
