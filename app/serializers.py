@@ -180,6 +180,7 @@ class NodeDetailsSerializer(serializers.Serializer):
     picture = serializers.URLField(allow_null=True)
     level = serializers.SerializerMethodField()
     is_starred = serializers.SerializerMethodField()
+    updated_at = serializers.DateTimeField()
 
     def get_level(self, obj):
         return getattr(obj, 'level', None)
@@ -279,6 +280,7 @@ class ItemNodeDetailsSerializer(serializers.Serializer):
     checkouts = serializers.SerializerMethodField()
     can_manage_checkouts = serializers.SerializerMethodField()
     is_starred = serializers.SerializerMethodField()
+    updated_at = serializers.DateTimeField()
 
     def get_is_starred(self, obj):
         return self.context.get('is_starred', False)

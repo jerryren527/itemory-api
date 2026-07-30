@@ -14,6 +14,8 @@ import jwt as pyjwt
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.core import signing
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
+from django.db import transaction
 from django.shortcuts import render
 from rest_framework.exceptions import AuthenticationFailed, ValidationError
 from rest_framework import serializers, permissions
@@ -1126,6 +1128,55 @@ def _get_member_node_or_error(request, node_type, node_id):
 
 
 _STAR_MODEL_BY_TYPE = {'room': StarredRoom, 'container': StarredContainer, 'item': StarredItem}
+_NODE_MODEL_BY_TYPE = {'room': Room, 'container': Container, 'item': Item}
+
+
+def _updated_at_matches(current, expected):
+    """
+    Compare two aware datetimes for the optimistic-concurrency check,
+    truncated to millisecond precision. The mobile client round-trips
+    updated_at through a JS Date, which only carries millisecond precision,
+    so comparing at full microsecond precision would falsely flag every
+    edit as stale.
+    """
+    to_ms = lambda dt: dt.replace(microsecond=(dt.microsecond // 1000) * 1000)
+    return to_ms(current) == to_ms(expected)
+
+
+def _optimistic_lock_or_error(model, pk, expected_updated_at, label):
+    """
+    Must be called inside transaction.atomic(). Re-fetches the row with
+    select_for_update() to close the TOCTOU race between reading updated_at
+    and writing it (a plain read-then-compare-then-save can let two
+    near-simultaneous requests both pass the check). If expected_updated_at
+    is falsy, the caller's request predates this field (see OCC spec Sec 2)
+    and the check is skipped entirely. Returns (locked_instance, None) on
+    success, or (None, error_response) on conflict/not-found/malformed input.
+    """
+    try:
+        locked = model.objects.select_for_update().get(pk=pk)
+    except ObjectDoesNotExist:
+        return None, Response(
+            {"message": f"{label} with id {pk} not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+
+    if expected_updated_at:
+        expected = parse_datetime(expected_updated_at) if isinstance(expected_updated_at, str) else None
+        if expected is None:
+            return None, Response(
+                {"message": "expected_updated_at is not a valid ISO-8601 datetime."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not _updated_at_matches(locked.updated_at, expected):
+            return None, Response(
+                {
+                    "message": f"This {label} has been changed since you loaded it. "
+                               "Please refresh and try again."
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+    return locked, None
 
 
 def get_starred_keys(user, nodes):
@@ -1171,9 +1222,23 @@ def rename_node(request, node_type, node_id):
             {"message": f'An item named "{name}" already exists here.'}, status=status.HTTP_400_BAD_REQUEST
         )
 
-    node.name = name
-    node.save()
-    return Response({"status": "ok"}, status=status.HTTP_200_OK)
+    with transaction.atomic():
+        node, error = _optimistic_lock_or_error(
+            _NODE_MODEL_BY_TYPE[node_type], node.pk, request.data.get('expected_updated_at'), node_type
+        )
+        if error:
+            return error
+        node.name = name
+        node.save()
+
+    if node_type == 'item':
+        is_starred = StarredItem.objects.filter(user=request.user, item=node).exists()
+        node_details = ItemNodeDetailsSerializer(node, context={'request': request, 'is_starred': is_starred})
+    else:
+        is_starred = _STAR_MODEL_BY_TYPE[node_type].objects.filter(user=request.user, **{node_type: node}).exists()
+        node_details = NodeDetailsSerializer(node, context={'is_starred': is_starred})
+
+    return Response(node_details.data, status=status.HTTP_200_OK)
 
 
 @api_view(['POST'])
@@ -1253,9 +1318,6 @@ def update_item(request, item_id):
             return Response(
                 {"message": f'An item named "{name}" already exists here.'}, status=status.HTTP_400_BAD_REQUEST
             )
-        item.name = name
-    if 'description' in data:
-        item.description = data.get('description') or None
     if 'quantity' in data:
         new_quantity = data.get('quantity') or 1
         checked_out = sum(item.checkouts.values_list('quantity', flat=True))
@@ -1264,22 +1326,39 @@ def update_item(request, item_id):
                 {"message": f"Cannot set quantity below the {checked_out} already checked out."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        item.quantity = new_quantity
-    if 'category' in data:
-        item.category = data.get('category') or None
-    if 'expiration_date' in data:
-        item.expiration_date = data.get('expiration_date') or None
-    if 'comment' in data:
-        item.comment = data.get('comment') or None
-    if 'tags' in data:
-        item.tags = data.get('tags') or None
-    if 'picture' in data:
-        new_picture = data.get('picture') or None
-        if item.picture and item.picture != new_picture:
-            delete_item_photo(item.picture)
-        item.picture = new_picture
 
-    item.save()
+    old_picture = None
+    with transaction.atomic():
+        item, error = _optimistic_lock_or_error(Item, item.pk, data.get('expected_updated_at'), 'item')
+        if error:
+            return error
+
+        if 'name' in data:
+            item.name = name
+        if 'description' in data:
+            item.description = data.get('description') or None
+        if 'quantity' in data:
+            item.quantity = new_quantity
+        if 'category' in data:
+            item.category = data.get('category') or None
+        if 'expiration_date' in data:
+            item.expiration_date = data.get('expiration_date') or None
+        if 'comment' in data:
+            item.comment = data.get('comment') or None
+        if 'tags' in data:
+            item.tags = data.get('tags') or None
+        if 'picture' in data:
+            new_picture = data.get('picture') or None
+            if item.picture and item.picture != new_picture:
+                old_picture = item.picture
+            item.picture = new_picture
+
+        item.save()
+
+    # Deleted only after the transaction commits, so the S3 call (network
+    # I/O) doesn't extend how long the row lock above is held.
+    if old_picture:
+        delete_item_photo(old_picture)
 
     return Response(ItemNodeDetailsSerializer(item, context={'request': request}).data, status=status.HTTP_200_OK)
 
@@ -1617,8 +1696,13 @@ def rename_home(request, home_id):
     if not name:
         return Response({"message": "name is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-    home.name = name
-    home.save()
+    with transaction.atomic():
+        home, error = _optimistic_lock_or_error(Home, home.pk, request.data.get('expected_updated_at'), 'home')
+        if error:
+            return error
+        home.name = name
+        home.save()
+
     return Response(HomeSerializer(home, context={'user': request.user}).data, status=status.HTTP_200_OK)
 
 
@@ -1628,8 +1712,13 @@ def update_home_address(request, home_id):
     if error:
         return error
 
-    home.address = request.data.get('address') or None
-    home.save()
+    with transaction.atomic():
+        home, error = _optimistic_lock_or_error(Home, home.pk, request.data.get('expected_updated_at'), 'home')
+        if error:
+            return error
+        home.address = request.data.get('address') or None
+        home.save()
+
     return Response(HomeSerializer(home, context={'user': request.user}).data, status=status.HTTP_200_OK)
 
 

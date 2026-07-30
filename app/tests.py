@@ -936,3 +936,137 @@ class ItemUniqueNameTests(APITestCase):
             reverse("app:update-item", args=[other_item.id]), {"name": "Mug"}, format="json",
         )
         self.assertEqual(response.status_code, 400)
+
+
+class OptimisticConcurrencyTests(APITestCase):
+    """
+    expected_updated_at is optional (old clients omit it and skip the check
+    entirely) but, when present, must be atomically compared against the
+    row's real updated_at before any write is applied.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="occowner@example.com",
+            password="Pass123!",
+            email_verified=True,
+        )
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {refresh.access_token}")
+
+        self.home = Home.objects.create(name="My Home", created_by=self.user)
+        HomeMembership.objects.create(user=self.user, home=self.home)
+        self.room = Room.objects.create(name="Kitchen", home=self.home, created_by=self.user)
+        self.item = Item.objects.create(name="Blender", room=self.room, created_by=self.user)
+
+    def _iso(self, dt):
+        return dt.isoformat()
+
+    # --- rename_home ---
+
+    def test_rename_home_without_expected_updated_at_succeeds(self):
+        response = self.client.post(
+            reverse("app:rename-home", args=[self.home.id]), {"name": "New Name"}, format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.home.refresh_from_db()
+        self.assertEqual(self.home.name, "New Name")
+
+    def test_rename_home_with_matching_expected_updated_at_succeeds(self):
+        response = self.client.post(
+            reverse("app:rename-home", args=[self.home.id]),
+            {"name": "New Name", "expected_updated_at": self._iso(self.home.updated_at)},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("updated_at", response.data)
+
+    def test_rename_home_with_stale_expected_updated_at_returns_409_and_does_not_write(self):
+        stale = self._iso(self.home.updated_at)
+        self.home.name = "Changed By Someone Else"
+        self.home.save()
+
+        response = self.client.post(
+            reverse("app:rename-home", args=[self.home.id]),
+            {"name": "My Attempted Rename", "expected_updated_at": stale},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.home.refresh_from_db()
+        self.assertEqual(self.home.name, "Changed By Someone Else")
+
+    def test_rename_home_with_malformed_expected_updated_at_returns_400(self):
+        response = self.client.post(
+            reverse("app:rename-home", args=[self.home.id]),
+            {"name": "New Name", "expected_updated_at": "not-a-date"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    # --- update_home_address ---
+
+    def test_update_home_address_with_stale_expected_updated_at_returns_409(self):
+        stale = self._iso(self.home.updated_at)
+        self.home.address = "123 Main St"
+        self.home.save()
+
+        response = self.client.post(
+            reverse("app:update-home-address", args=[self.home.id]),
+            {"address": "456 Oak Ave", "expected_updated_at": stale},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.home.refresh_from_db()
+        self.assertEqual(self.home.address, "123 Main St")
+
+    # --- rename_node ---
+
+    def test_rename_node_with_matching_expected_updated_at_succeeds_and_returns_updated_at(self):
+        response = self.client.post(
+            reverse("app:rename-node", args=["room", self.room.id]),
+            {"name": "Pantry", "expected_updated_at": self._iso(self.room.updated_at)},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("updated_at", response.data)
+
+    def test_rename_node_with_stale_expected_updated_at_returns_409(self):
+        stale = self._iso(self.room.updated_at)
+        self.room.name = "Changed By Someone Else"
+        self.room.save()
+
+        response = self.client.post(
+            reverse("app:rename-node", args=["room", self.room.id]),
+            {"name": "My Attempted Rename", "expected_updated_at": stale},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.room.refresh_from_db()
+        self.assertEqual(self.room.name, "Changed By Someone Else")
+
+    # --- update_item ---
+
+    def test_update_item_with_stale_expected_updated_at_returns_409_and_does_not_write(self):
+        stale = self._iso(self.item.updated_at)
+        self.item.description = "Changed By Someone Else"
+        self.item.save()
+
+        response = self.client.post(
+            reverse("app:update-item", args=[self.item.id]),
+            {"description": "My Attempted Edit", "expected_updated_at": stale},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.description, "Changed By Someone Else")
+
+    def test_update_item_with_matching_expected_updated_at_succeeds_and_returns_updated_at(self):
+        response = self.client.post(
+            reverse("app:update-item", args=[self.item.id]),
+            {"description": "A blender", "expected_updated_at": self._iso(self.item.updated_at)},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("updated_at", response.data)
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.description, "A blender")
