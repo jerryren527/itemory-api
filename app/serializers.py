@@ -33,7 +33,8 @@ class IdentifySerializer(serializers.Serializer):
 
 class LoginSerializer(serializers.Serializer):
     # serializers.Serializer class gives you access to is_valid() and .errors property
-    email = serializers.EmailField()
+    # 'identifier' accepts either an email address or a username; resolved to a user in the view.
+    identifier = serializers.CharField()
     password = serializers.CharField(write_only=True)
 
     def validate(self, attrs):

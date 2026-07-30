@@ -584,12 +584,13 @@ class LoginTests(APITestCase):
         self.url = reverse("app:login")
         self.user = User.objects.create_user(
             email="testuser@example.com",
+            username="testuser",
             password="StrongPassword123!",
             email_verified=True,
         )
 
-    def _post(self, email="testuser@example.com", password="StrongPassword123!"):
-        return self.client.post(self.url, {"email": email, "password": password}, format="json")
+    def _post(self, identifier="testuser@example.com", password="StrongPassword123!"):
+        return self.client.post(self.url, {"identifier": identifier, "password": password}, format="json")
 
     def test_successful_login_returns_200(self):
         self.assertEqual(self._post().status_code, 200)
@@ -605,7 +606,7 @@ class LoginTests(APITestCase):
         self.assertEqual(self._post(password="WrongPassword1!").status_code, 401)
 
     def test_nonexistent_email_returns_401(self):
-        self.assertEqual(self._post(email="nobody@example.com").status_code, 401)
+        self.assertEqual(self._post(identifier="nobody@example.com").status_code, 401)
 
     def test_unverified_user_cannot_login(self):
         User.objects.create_user(
@@ -613,17 +614,26 @@ class LoginTests(APITestCase):
             password="StrongPassword123!",
             email_verified=False,
         )
-        self.assertEqual(self._post(email="unverified@example.com").status_code, 401)
+        self.assertEqual(self._post(identifier="unverified@example.com").status_code, 401)
 
     def test_email_login_is_case_insensitive(self):
-        self.assertEqual(self._post(email="TESTUSER@EXAMPLE.COM").status_code, 200)
+        self.assertEqual(self._post(identifier="TESTUSER@EXAMPLE.COM").status_code, 200)
 
-    def test_missing_email_returns_401(self):
+    def test_username_login_returns_200(self):
+        self.assertEqual(self._post(identifier="testuser").status_code, 200)
+
+    def test_username_login_is_case_insensitive(self):
+        self.assertEqual(self._post(identifier="TestUser").status_code, 200)
+
+    def test_nonexistent_username_returns_401(self):
+        self.assertEqual(self._post(identifier="nobodyuser").status_code, 401)
+
+    def test_missing_identifier_returns_401(self):
         response = self.client.post(self.url, {"password": "StrongPassword123!"}, format="json")
         self.assertEqual(response.status_code, 401)
 
     def test_missing_password_returns_401(self):
-        response = self.client.post(self.url, {"email": "testuser@example.com"}, format="json")
+        response = self.client.post(self.url, {"identifier": "testuser@example.com"}, format="json")
         self.assertEqual(response.status_code, 401)
 
 
