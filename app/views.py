@@ -23,7 +23,8 @@ from django.core.mail import send_mail
 from django.core.signing import TimestampSigner
 from datetime import timedelta, datetime
 from django.contrib.auth import authenticate
-from django.db.models import Q
+from django.db.models import Q, BooleanField
+from django.db.models.expressions import RawSQL
 import time
 # from .services import place_node_helpers
 from .services.search_helpers import (
@@ -1484,6 +1485,9 @@ def search_nodes(request):
     """
     Search rooms/containers/items the user has access to.
 
+    Rooms and containers match on name only. Items also match on category
+    and tags, since those are searchable item attributes.
+
     Query params:
       q: search text (required)
       scope: 'folder' | 'everywhere' (required)
@@ -1522,9 +1526,27 @@ def search_nodes(request):
 
     rooms = list(Room.objects.filter(id__in=result_scope['match_room_ids'], name__icontains=q))
     containers = list(Container.objects.filter(id__in=result_scope['match_container_ids'], name__icontains=q))
-    items = list(Item.objects.filter(
+
+    # tags is a Postgres array field, so matching q against individual tags
+    # needs unnest() rather than a plain __icontains lookup (which only
+    # supports whole-array membership checks, not substrings). unnest() has
+    # to live inside a correlated EXISTS subquery rather than directly in
+    # WHERE, since Postgres disallows set-returning functions there.
+    #
+    # ILIKE's own wildcards (%, _) need escaping so a literal % or _ in q is
+    # matched literally, same as name__icontains/category__icontains already
+    # do under the hood.
+    escaped_q = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    tag_match = RawSQL(
+        "EXISTS (SELECT 1 FROM unnest(tags) AS tag WHERE tag ILIKE %s)",
+        (f"%{escaped_q}%",),
+        output_field=BooleanField(),
+    )
+
+    items = list(Item.objects.annotate(tag_match=tag_match).filter(
         Q(room_id__in=result_scope['item_room_ids']) | Q(container_id__in=result_scope['item_container_ids']),
-        name__icontains=q,
+    ).filter(
+        Q(name__icontains=q) | Q(category__icontains=q) | Q(tag_match=True)
     ))
 
     for r in rooms:
