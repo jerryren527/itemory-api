@@ -1,4 +1,4 @@
-app/migrations/*
+app/migrations/__pycache__
 app/__pycache__
 .vscode/*
 app/backend/__pycache__
@@ -6,3 +6,6 @@ app/management/commands/__pycache__
 app/services/__pycache__
 .DS_Store
 .env
+itemory_project/__pycache__
+venv/
+staticfiles/
