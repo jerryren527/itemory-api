@@ -864,6 +864,59 @@ class SearchNodesTests(APITestCase):
         })
         self.assertEqual(response.status_code, 404)
 
+    # --- item matching on category and tags ---
+
+    def test_everywhere_scope_matches_item_by_category(self):
+        Item.objects.create(
+            name="Toaster", room=self.room, created_by=self.user, category="kitchen",
+        )
+        response = self._get({"q": "kitchen", "scope": "everywhere"})
+        self.assertEqual(response.status_code, 200)
+        names = {r["name"] for r in response.data["results"]}
+        self.assertIn("Toaster", names)
+
+    def test_everywhere_scope_matches_item_by_tag(self):
+        Item.objects.create(
+            name="Widget", room=self.other_room, created_by=self.user, tags=["outdoor", "camping"],
+        )
+        response = self._get({"q": "camping", "scope": "everywhere"})
+        self.assertEqual(response.status_code, 200)
+        names = {r["name"] for r in response.data["results"]}
+        self.assertEqual(names, {"Widget"})
+
+    def test_everywhere_scope_tag_match_is_case_insensitive_and_partial(self):
+        Item.objects.create(
+            name="Widget", room=self.other_room, created_by=self.user, tags=["Camping"],
+        )
+        response = self._get({"q": "CAMP", "scope": "everywhere"})
+        self.assertEqual(response.status_code, 200)
+        names = {r["name"] for r in response.data["results"]}
+        self.assertEqual(names, {"Widget"})
+
+    def test_everywhere_scope_no_tag_match_returns_empty(self):
+        Item.objects.create(
+            name="Widget", room=self.other_room, created_by=self.user, tags=["outdoor"],
+        )
+        response = self._get({"q": "nonexistenttag", "scope": "everywhere"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["results"], [])
+
+    def test_everywhere_scope_item_with_null_tags_does_not_error(self):
+        Item.objects.create(name="Widget", room=self.other_room, created_by=self.user)
+        response = self._get({"q": "widget", "scope": "everywhere"})
+        self.assertEqual(response.status_code, 200)
+        names = {r["name"] for r in response.data["results"]}
+        self.assertEqual(names, {"Widget"})
+
+    def test_everywhere_scope_tag_match_excludes_other_users_items(self):
+        Item.objects.create(
+            name="Foreign Widget", room=self.foreign_room, created_by=self.other_user, tags=["camping"],
+        )
+        response = self._get({"q": "camping", "scope": "everywhere"})
+        self.assertEqual(response.status_code, 200)
+        names = {r["name"] for r in response.data["results"]}
+        self.assertNotIn("Foreign Widget", names)
+
 
 class ItemUniqueNameTests(APITestCase):
     """
