@@ -31,6 +31,8 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('app/', include("app.urls")),
     path('privacy/', TemplateView.as_view(template_name="privacy_policy.html"), name="privacy-policy"),
+    path('support/', TemplateView.as_view(template_name="support.html"), name="support"),
+    path('delete-account/', TemplateView.as_view(template_name="delete_account.html"), name="delete-account-info"),
 
     # Simplejwt Library
     path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),

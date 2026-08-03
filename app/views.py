@@ -1,3 +1,4 @@
+from django.conf import settings
 from rest_framework import permissions, viewsets, status
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
@@ -23,7 +24,7 @@ from django.core.mail import send_mail
 from django.core.signing import TimestampSigner
 from datetime import timedelta, datetime
 from django.contrib.auth import authenticate
-from django.db.models import Q, BooleanField
+from django.db.models import Q, BooleanField, Count
 from django.db.models.expressions import RawSQL
 import time
 # from .services import place_node_helpers
@@ -719,6 +720,42 @@ def update_username(request):
 
 
 @api_view(['POST'])
+def delete_account(request):
+    """Permanently delete the authenticated user's account and owned data.
+
+    Homes where this user is the only member are deleted entirely (mirroring
+    delete_home) so they don't survive as orphaned, member-less homes. Shared
+    homes just lose this user's membership via CASCADE; the home and its data
+    stay for the remaining members, with created_by set to NULL wherever this
+    user was the creator.
+    """
+    user = request.user
+    password = request.data.get('password')
+
+    if user.has_password and not (password and user.check_password(password)):
+        return Response({"message": "Incorrect password."}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Filtering by id__in (rather than memberships__user directly) keeps this
+    # a separate query from the Count() below — filtering and annotating on
+    # the same relation in one queryset restricts the join, so the count
+    # would always come out as 1 regardless of a home's true membership size.
+    member_home_ids = list(HomeMembership.objects.filter(user=user).values_list('home_id', flat=True))
+    solo_home_ids = list(
+        Home.objects.filter(id__in=member_home_ids)
+        .annotate(member_count=Count('homemembership'))
+        .filter(member_count=1)
+        .values_list('id', flat=True)
+    )
+    for home in Home.objects.filter(id__in=solo_home_ids):
+        container_ids = get_container_ids_for_home(home)
+        Item.objects.filter(Q(room__home=home) | Q(container_id__in=container_ids)).delete()
+        home.delete()
+
+    user.delete()
+    return Response({"status": "ok"}, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
 @permission_classes([permissions.AllowAny])
 def send_reset_password_email(request):
     print('====INSIDE send_reset_password_email====')
@@ -744,7 +781,7 @@ def send_reset_password_email(request):
         token = signer.sign(user.id)
 
         # The verification url is just a normal HTTP GET link with a token passed as a query parameter. This url is emailed to the email address.
-        verification_url = f"http://127.0.0.1:8000/app/reset-password/?token={token}"
+        verification_url = f"{settings.API_BASE_URL}/app/reset-password/?token={token}"
 
         try:
             print('Adding Password Reset Token to DB...')

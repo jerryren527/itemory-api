@@ -1,3 +1,4 @@
+from django.conf import settings
 from rest_framework import serializers
 from django.contrib.auth import get_user_model, authenticate
 from django.contrib.auth.password_validation import validate_password
@@ -95,7 +96,7 @@ class RegisterSerializer(serializers.Serializer):
 
         token = signing.dumps({"user_id": user.id})
         # The verification url is just a normal HTTP GET link with a token passed as a query parameter. This url is emailed to the email address.
-        verification_url = f"http://127.0.0.1:8000/app/verify-email/?token={token}"
+        verification_url = f"{settings.API_BASE_URL}/app/verify-email/?token={token}"
         # Trying with Scheme. I change my mind. To support cross-platform, I will keep the verification url as a web-based URL. I also still have not figured out how to make the deep link work.
         # verification_url = f"itemory://VerifyEmailPage/?token={token}"
 

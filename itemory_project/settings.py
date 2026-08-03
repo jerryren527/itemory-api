@@ -42,6 +42,27 @@ if not DEBUG:
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
 
+# Django's own default LOGGING config only sends unhandled 500s to
+# mail_admins, not the console — so they're invisible in `railway logs`.
+# Send them to console too (client response is unaffected; still a generic
+# 500 page since DEBUG is off).
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+        },
+    },
+    "loggers": {
+        "django.request": {
+            "handlers": ["console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+    },
+}
+
 
 # Application definition
 
@@ -184,8 +205,17 @@ EMAIL_HOST_USER = env("EMAIL_HOST_USER")  # SMTP server username
 EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD")  # SMTP server password
 EMAIL_PORT = 587  # SMTP server port (587 for TLS, 465 for SSL)
 EMAIL_USE_TLS = True  # True for TLS, False for SSL
-EMAIL_BACKEND = 'app.backend.email_backend.EmailBackend'
-# EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_BACKEND = env("EMAIL_BACKEND", default="app.backend.email_backend.EmailBackend")
+
+# Base URL used to build links (email verification, password reset) sent in
+# emails. Defaults to local dev; set to the real API domain in production.
+API_BASE_URL = env("API_BASE_URL", default="http://127.0.0.1:8000")
+
+# Used by app.backend.gmail_api_backend.GmailAPIBackend, which sends mail via
+# the Gmail API over HTTPS since Railway blocks outbound SMTP.
+GMAIL_API_CLIENT_ID = env("GMAIL_API_CLIENT_ID", default=None)
+GMAIL_API_CLIENT_SECRET = env("GMAIL_API_CLIENT_SECRET", default=None)
+GMAIL_API_REFRESH_TOKEN = env("GMAIL_API_REFRESH_TOKEN", default=None)
 
 # Only the native iOS/Android app talks to this API in production, and CORS
 # doesn't apply to native fetch/axios calls (no browser Origin header) — this
