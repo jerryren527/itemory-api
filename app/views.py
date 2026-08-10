@@ -1402,6 +1402,69 @@ def update_item(request, item_id):
 
 
 @api_view(['POST'])
+def move_item(request, item_id):
+    """
+    Move an Item to a different Room or Container (possibly in a different
+    Home). Exactly one of room_id/container_id is required, and it must
+    differ from the item's current location. Any member of the owning home
+    of the item may initiate the move; membership of the *destination* home
+    is what's actually required, since that's where the write lands.
+    """
+    item, error = _get_member_node_or_error(request, 'item', item_id)
+    if error:
+        return error
+
+    room_id = request.data.get('room_id')
+    container_id = request.data.get('container_id')
+
+    if bool(room_id) == bool(container_id):
+        return Response(
+            {"message": "Exactly one of room_id or container_id is required."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if room_id:
+        try:
+            room = Room.objects.get(pk=room_id)
+        except ObjectDoesNotExist:
+            return Response({"message": f"Room with id {room_id} not found."}, status=status.HTTP_404_NOT_FOUND)
+        if item.room_id == room.id:
+            return Response({"message": "Item is already in this room."}, status=status.HTTP_400_BAD_REQUEST)
+        home_id = room.home_id
+        new_room, new_container = room, None
+    else:
+        try:
+            container = Container.objects.get(pk=container_id)
+        except ObjectDoesNotExist:
+            return Response(
+                {"message": f"Container with id {container_id} not found."}, status=status.HTTP_404_NOT_FOUND
+            )
+        if item.container_id == container.id:
+            return Response({"message": "Item is already in this container."}, status=status.HTTP_400_BAD_REQUEST)
+        home_tag = resolve_container_home(container)
+        home_id = home_tag[0] if home_tag else None
+        new_room, new_container = None, container
+
+    if not home_id or not HomeMembership.objects.filter(user=request.user, home_id=home_id).exists():
+        return Response({"message": "Destination not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if _duplicate_item_name(item.name, room=new_room, container=new_container, exclude_id=item.id):
+        return Response(
+            {"message": f'An item named "{item.name}" already exists there.'}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    with transaction.atomic():
+        item, error = _optimistic_lock_or_error(Item, item.pk, request.data.get('expected_updated_at'), 'item')
+        if error:
+            return error
+        item.room = new_room
+        item.container = new_container
+        item.save()
+
+    return Response(ItemNodeDetailsSerializer(item, context={'request': request}).data, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
 def presign_item_photo(request, item_id):
     """
     Mint a presigned S3 PUT URL for uploading a photo for an item. Any

@@ -7,7 +7,7 @@ from django.core.mail import send_mail
 from rest_framework.exceptions import AuthenticationFailed
 from django.core.signing import TimestampSigner
 from .models import CustomUser, Room, Container, Item, HomeMembership, Home
-from .services.search_helpers import get_home_id_for_item
+from .services.search_helpers import get_home_id_for_item, get_item_location_path, get_ancestor_path
 
 
 User = get_user_model()  # reads AUTH_USER_MODEL in settings.py
@@ -239,6 +239,11 @@ class SearchResultSerializer(ChildSerializer):
     """
     home_id = serializers.IntegerField()
     home_name = serializers.CharField()
+    path = serializers.SerializerMethodField()
+
+    def get_path(self, obj):
+        """Full breadcrumb (home -> ... -> immediate parent), e.g. 'Home > Room > Container'."""
+        return " > ".join(step["name"] for step in get_ancestor_path(obj))
 
 
 class CheckedOutItemSerializer(SearchResultSerializer):
@@ -281,10 +286,16 @@ class ItemNodeDetailsSerializer(serializers.Serializer):
     checkouts = serializers.SerializerMethodField()
     can_manage_checkouts = serializers.SerializerMethodField()
     is_starred = serializers.SerializerMethodField()
+    location = serializers.SerializerMethodField()
+    room_id = serializers.IntegerField(allow_null=True)
+    container_id = serializers.IntegerField(allow_null=True)
     updated_at = serializers.DateTimeField()
 
     def get_is_starred(self, obj):
         return self.context.get('is_starred', False)
+
+    def get_location(self, obj):
+        return " > ".join(step["name"] for step in get_item_location_path(obj))
 
     def get_available_quantity(self, obj):
         checked_out = sum(c.quantity for c in obj.checkouts.all())

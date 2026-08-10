@@ -72,6 +72,57 @@ def resolve_container_home(container):
     return None
 
 
+def get_path_to_room_or_container(node):
+    """
+    Ordered breadcrumb from the owning Home down to `node` (a Room or
+    Container instance), inclusive of both ends. Each entry is
+    {"type", "id", "name"}. Bounded by Container's max level (5), same as
+    resolve_container_home.
+    """
+    if isinstance(node, Room):
+        return [
+            {"type": "home", "id": node.home_id, "name": node.home.name},
+            {"type": "room", "id": node.id, "name": node.name},
+        ]
+
+    chain = []
+    current = node
+    for _ in range(6):
+        chain.append({"type": "container", "id": current.id, "name": current.name})
+        if current.room_id:
+            room = current.room
+            chain.append({"type": "room", "id": room.id, "name": room.name})
+            chain.append({"type": "home", "id": room.home_id, "name": room.home.name})
+            break
+        current = current.parent_container
+    chain.reverse()
+    return chain
+
+
+def get_item_location_path(item):
+    """Breadcrumb (home -> ... -> item's immediate parent) for an Item, or [] if it has neither room nor container."""
+    if item.room_id:
+        return get_path_to_room_or_container(item.room)
+    if item.container_id:
+        return get_path_to_room_or_container(item.container)
+    return []
+
+
+def get_ancestor_path(node):
+    """
+    Breadcrumb of `node`'s ancestors (home -> ... -> immediate parent),
+    excluding `node` itself. Works for Room, Container, and Item instances -
+    used to show a search result's full location.
+    """
+    if isinstance(node, Item):
+        return get_item_location_path(node)
+    if isinstance(node, Room):
+        return [{"type": "home", "id": node.home_id, "name": node.home.name}]
+    if isinstance(node, Container):
+        return get_path_to_room_or_container(node)[:-1]
+    return []
+
+
 def resolve_search_scope(user, scope, origin_type, origin_id):
     """
     Returns a dict:
