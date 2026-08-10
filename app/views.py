@@ -1922,3 +1922,36 @@ def remove_home_member(request, home_id):
         return Response({"message": "That user is not a member of this home."}, status=status.HTTP_404_NOT_FOUND)
 
     return Response({"status": "ok"}, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def leave_home(request, home_id):
+    """Remove the authenticated user's own membership in a home.
+
+    Lets any non-creator member take a home off their Places tab, including
+    homes whose creator account has since been deleted (created_by is NULL),
+    where nobody with delete authority remains.
+    """
+    try:
+        home = Home.objects.get(pk=home_id)
+    except ObjectDoesNotExist:
+        return Response(
+            {"message": f"Home with id {home_id} not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    if home.created_by_id == request.user.id:
+        return Response(
+            {"message": "The creator cannot leave. Delete the home instead."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    deleted, _ = HomeMembership.objects.filter(home=home, user=request.user).delete()
+    if not deleted:
+        return Response({"message": "You are not a member of this home."}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.user.primary_home_id == home.id:
+        request.user.primary_home = None
+        request.user.save()
+
+    return Response({"status": "ok"}, status=status.HTTP_200_OK)

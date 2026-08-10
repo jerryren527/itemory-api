@@ -1,5 +1,5 @@
 from django.urls import path, include
-from .views import google_sign_in, google_link, google_unlink, apple_sign_in, apple_confirm, apple_link, apple_unlink, email_sign_in, check_email, register, verify_email, login, test_view, send_reset_password_email, reset_password, me, get_node, get_homes, set_password, remove_password, update_username, delete_account, create_home, set_primary_home, search_nodes, rename_home, update_home_address, delete_home, share_home, get_home_members, remove_home_member, create_room, create_container, create_item, rename_node, delete_node, update_item, move_item, checkout_item, return_item_checkout, checked_out_items, star_node, unstar_node, starred_nodes, presign_item_photo, delete_item_photo_view
+from .views import google_sign_in, google_link, google_unlink, apple_sign_in, apple_confirm, apple_link, apple_unlink, email_sign_in, check_email, register, verify_email, login, test_view, send_reset_password_email, reset_password, me, get_node, get_homes, set_password, remove_password, update_username, delete_account, create_home, set_primary_home, search_nodes, rename_home, update_home_address, delete_home, share_home, get_home_members, remove_home_member, leave_home, create_room, create_container, create_item, rename_node, delete_node, update_item, move_item, checkout_item, return_item_checkout, checked_out_items, star_node, unstar_node, starred_nodes, presign_item_photo, delete_item_photo_view
 
 app_name = "app"
 urlpatterns = [
@@ -60,6 +60,7 @@ urlpatterns = [
     path('home/<int:home_id>/share', share_home, name='share-home'),
     path('home/<int:home_id>/members', get_home_members, name='get-home-members'),
     path('home/<int:home_id>/remove-member', remove_home_member, name='remove-home-member'),
+    path('home/<int:home_id>/leave', leave_home, name='leave-home'),
 
     # Endpoints for creating Rooms/Containers/Items
     path('room', create_room, name='create-room'),
