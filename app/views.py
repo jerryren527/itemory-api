@@ -24,7 +24,7 @@ from django.core.mail import send_mail
 from django.core.signing import TimestampSigner
 from datetime import timedelta, datetime
 from django.contrib.auth import authenticate
-from django.db.models import Q, BooleanField, Count
+from django.db.models import Q, BooleanField, Count, F, Max
 from django.db.models.expressions import RawSQL
 import time
 # from .services import place_node_helpers
@@ -1602,6 +1602,103 @@ def move_item(request, item_id):
         item.save()
 
     return Response(ItemNodeDetailsSerializer(item, context={'request': request}).data, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def move_container(request, container_id):
+    """
+    Move a Container to a different Room (becomes level 1) or a different
+    parent Container (level = parent.level + 1), possibly in a different
+    Home. Exactly one of room_id/parent_container_id is required, and it
+    must differ from the container's current location. Unlike items, a
+    container can carry its own subtree with it, so this also: (a) refuses
+    to move a container into itself or one of its own descendants, and (b)
+    shifts every descendant container's level by the same delta the moved
+    container gets, refusing the move outright if that would push any of
+    them past the level-5 nesting cap. Any member of the owning home of the
+    container may initiate the move; membership of the *destination* home is
+    what's actually required, since that's where the write lands.
+    """
+    container, error = _get_member_node_or_error(request, 'container', container_id)
+    if error:
+        return error
+
+    room_id = request.data.get('room_id')
+    parent_container_id = request.data.get('parent_container_id')
+
+    if bool(room_id) == bool(parent_container_id):
+        return Response(
+            {"message": "Exactly one of room_id or parent_container_id is required."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Includes the container's own id - also doubles as the cycle check below.
+    # include_trashed=True so a trashed descendant's level gets shifted along
+    # with its live ancestor's move too, otherwise it'd come back stale (and
+    # potentially past the level-5 cap) whenever it's later restored.
+    subtree_ids = get_container_subtree_ids(container, include_trashed=True)
+
+    if room_id:
+        try:
+            room = Room.objects.get(pk=room_id, deleted_at__isnull=True)
+        except ObjectDoesNotExist:
+            return Response({"message": f"Room with id {room_id} not found."}, status=status.HTTP_404_NOT_FOUND)
+        if container.room_id == room.id:
+            return Response({"message": "Container is already in this room."}, status=status.HTTP_400_BAD_REQUEST)
+        home_id = room.home_id
+        new_room, new_parent, new_level = room, None, 1
+    else:
+        try:
+            parent_container_id = int(parent_container_id)
+        except (TypeError, ValueError):
+            return Response({"message": "parent_container_id must be an integer."}, status=status.HTTP_400_BAD_REQUEST)
+        if parent_container_id in subtree_ids:
+            return Response(
+                {"message": "A container can't be moved into itself or one of its own containers."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            parent = Container.objects.get(pk=parent_container_id, deleted_at__isnull=True)
+        except ObjectDoesNotExist:
+            return Response(
+                {"message": f"Container with id {parent_container_id} not found."}, status=status.HTTP_404_NOT_FOUND
+            )
+        if container.parent_container_id == parent.id:
+            return Response({"message": "Container is already in this container."}, status=status.HTTP_400_BAD_REQUEST)
+        home_tag = resolve_container_home(parent)
+        home_id = home_tag[0] if home_tag else None
+        new_room, new_parent, new_level = None, parent, parent.level + 1
+
+    if not home_id or not HomeMembership.objects.filter(user=request.user, home_id=home_id).exists():
+        return Response({"message": "Destination not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    level_delta = new_level - container.level
+    deepest_level = Container.objects.filter(id__in=subtree_ids).aggregate(Max('level'))['level__max']
+    if deepest_level + level_delta > 5:
+        return Response(
+            {"message": "Moving this container would nest some of its contents deeper than the maximum of 5 levels."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    with transaction.atomic():
+        container, error = _optimistic_lock_or_error(
+            Container, container.pk, request.data.get('expected_updated_at'), 'container'
+        )
+        if error:
+            return error
+
+        descendant_ids = subtree_ids - {container.pk}
+        if descendant_ids and level_delta != 0:
+            Container.objects.filter(id__in=descendant_ids).update(level=F('level') + level_delta)
+
+        container.room = new_room
+        container.parent_container = new_parent
+        container.level = new_level
+        container.save()
+
+    is_starred = StarredContainer.objects.filter(user=request.user, container=container).exists()
+    node_details = NodeDetailsSerializer(container, context={'request': request, 'is_starred': is_starred})
+    return Response(node_details.data, status=status.HTTP_200_OK)
 
 
 @api_view(['POST'])

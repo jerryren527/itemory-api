@@ -12,7 +12,7 @@ from email.mime.image import MIMEImage
 from rest_framework.exceptions import AuthenticationFailed
 from django.core.signing import TimestampSigner
 from .models import CustomUser, Room, Container, Item, HomeMembership, Home
-from .services.search_helpers import get_home_id_for_item, get_item_location_path, get_ancestor_path
+from .services.search_helpers import get_home_id_for_item, get_item_location_path, get_ancestor_path, resolve_container_home
 
 
 User = get_user_model()  # reads AUTH_USER_MODEL in settings.py
@@ -203,6 +203,9 @@ class NodeDetailsSerializer(serializers.Serializer):
     picture = serializers.URLField(allow_null=True)
     level = serializers.SerializerMethodField()
     is_starred = serializers.SerializerMethodField()
+    home_id = serializers.SerializerMethodField()
+    room_id = serializers.SerializerMethodField()
+    parent_container_id = serializers.SerializerMethodField()
     updated_at = serializers.DateTimeField()
 
     def get_level(self, obj):
@@ -210,6 +213,21 @@ class NodeDetailsSerializer(serializers.Serializer):
 
     def get_is_starred(self, obj):
         return self.context.get('is_starred', False)
+
+    def get_home_id(self, obj):
+        """The owning Home's id - obj is a Room or (possibly deeply nested) Container."""
+        if isinstance(obj, Room):
+            return obj.home_id
+        home_tag = resolve_container_home(obj)
+        return home_tag[0] if home_tag else None
+
+    def get_room_id(self, obj):
+        """A Container's direct parent Room, if it's a level-1 container. None for Room itself."""
+        return getattr(obj, 'room_id', None)
+
+    def get_parent_container_id(self, obj):
+        """A Container's direct parent Container, if nested. None for Room or a level-1 Container."""
+        return getattr(obj, 'parent_container_id', None)
 
 
 class ChildSerializer(serializers.Serializer):
@@ -314,6 +332,7 @@ class ItemNodeDetailsSerializer(serializers.Serializer):
     can_manage_checkouts = serializers.SerializerMethodField()
     is_starred = serializers.SerializerMethodField()
     location = serializers.SerializerMethodField()
+    home_id = serializers.SerializerMethodField()
     room_id = serializers.IntegerField(allow_null=True)
     container_id = serializers.IntegerField(allow_null=True)
     updated_at = serializers.DateTimeField()
@@ -323,6 +342,9 @@ class ItemNodeDetailsSerializer(serializers.Serializer):
 
     def get_location(self, obj):
         return " > ".join(step["name"] for step in get_item_location_path(obj))
+
+    def get_home_id(self, obj):
+        return get_home_id_for_item(obj)
 
     def get_available_quantity(self, obj):
         checked_out = sum(c.quantity for c in obj.checkouts.all())
