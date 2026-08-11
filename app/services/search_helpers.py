@@ -1,3 +1,5 @@
+from django.db.models import Q
+
 from ..models import Room, Container, Item, Home, HomeMembership
 
 
@@ -5,24 +7,30 @@ def get_home_ids_for_user(user):
     return set(HomeMembership.objects.filter(user=user).values_list('home_id', flat=True))
 
 
-def get_container_ids_for_home(home):
+def get_container_ids_for_home(home, include_trashed=False):
     """All Container ids (any nesting level, 1-5) that live under `home`."""
-    seed_ids = set(Container.objects.filter(room__home=home).values_list('id', flat=True))
+    seed_qs = Container.objects.filter(room__home=home)
+    if not include_trashed:
+        seed_qs = seed_qs.filter(deleted_at__isnull=True)
+    seed_ids = set(seed_qs.values_list('id', flat=True))
     home_by_container = {cid: (home.id, home.name) for cid in seed_ids}
-    return _expand_container_subtree(seed_ids, home_by_container)
+    return _expand_container_subtree(seed_ids, home_by_container, include_trashed=include_trashed)
 
 
-def get_container_ids_under_room(room):
+def get_container_ids_under_room(room, include_trashed=False):
     """All Container ids (any nesting level) that live directly or indirectly under `room`."""
-    seed_ids = set(Container.objects.filter(room=room).values_list('id', flat=True))
+    seed_qs = Container.objects.filter(room=room)
+    if not include_trashed:
+        seed_qs = seed_qs.filter(deleted_at__isnull=True)
+    seed_ids = set(seed_qs.values_list('id', flat=True))
     placeholder = {cid: None for cid in seed_ids}
-    return _expand_container_subtree(seed_ids, placeholder)
+    return _expand_container_subtree(seed_ids, placeholder, include_trashed=include_trashed)
 
 
-def get_container_subtree_ids(container):
+def get_container_subtree_ids(container, include_trashed=False):
     """`container`'s own id plus every descendant container id."""
     placeholder = {container.id: None}
-    return _expand_container_subtree({container.id}, placeholder)
+    return _expand_container_subtree({container.id}, placeholder, include_trashed=include_trashed)
 
 
 def get_home_id_for_item(item):
@@ -35,12 +43,17 @@ def get_home_id_for_item(item):
     return None
 
 
-def _expand_container_subtree(seed_ids, home_by_container):
+def _expand_container_subtree(seed_ids, home_by_container, include_trashed=False):
     """
     BFS down Container.parent_container_id starting from seed_ids (already
     present as keys in home_by_container, mapping container_id -> (home_id,
     home_name)). Container.level is capped at 5, so this converges in at most
     5 iterations. Returns the full set of descendant ids, including the seeds.
+
+    By default, trashed containers are excluded from the walk entirely (their
+    children are always trashed too, so there's nothing further to find).
+    include_trashed=True walks through them anyway - needed by restore/purge,
+    which must reach already-trashed descendants.
     """
     all_ids = set(seed_ids)
     frontier = set(seed_ids)
@@ -48,6 +61,8 @@ def _expand_container_subtree(seed_ids, home_by_container):
         if not frontier:
             break
         next_containers = Container.objects.filter(parent_container_id__in=frontier)
+        if not include_trashed:
+            next_containers = next_containers.filter(deleted_at__isnull=True)
         new_frontier = set()
         for c in next_containers:
             if c.id in all_ids:
@@ -141,12 +156,12 @@ def resolve_search_scope(user, scope, origin_type, origin_id):
 
     if scope == 'everywhere':
         homes = {h.id: (h.id, h.name) for h in Home.objects.filter(id__in=user_home_ids)}
-        rooms = list(Room.objects.filter(home_id__in=user_home_ids))
+        rooms = list(Room.objects.filter(home_id__in=user_home_ids, deleted_at__isnull=True))
         room_ids = {r.id for r in rooms}
         home_by_room = {r.id: homes[r.home_id] for r in rooms}
         home_by_container = {}
         seed_ids = set()
-        for c in Container.objects.filter(room_id__in=room_ids):
+        for c in Container.objects.filter(room_id__in=room_ids, deleted_at__isnull=True):
             seed_ids.add(c.id)
             home_by_container[c.id] = home_by_room[c.room_id]
         container_ids = _expand_container_subtree(seed_ids, home_by_container)
@@ -170,12 +185,12 @@ def resolve_search_scope(user, scope, origin_type, origin_id):
         except Home.DoesNotExist:
             raise ValueError('not_found')
         home_tag = (home.id, home.name)
-        rooms = list(Room.objects.filter(home_id=origin_id))
+        rooms = list(Room.objects.filter(home_id=origin_id, deleted_at__isnull=True))
         room_ids = {r.id for r in rooms}
         home_by_room = {rid: home_tag for rid in room_ids}
         home_by_container = {}
         seed_ids = set()
-        for c in Container.objects.filter(room_id__in=room_ids):
+        for c in Container.objects.filter(room_id__in=room_ids, deleted_at__isnull=True):
             seed_ids.add(c.id)
             home_by_container[c.id] = home_tag
         container_ids = _expand_container_subtree(seed_ids, home_by_container)
@@ -190,14 +205,16 @@ def resolve_search_scope(user, scope, origin_type, origin_id):
 
     if origin_type == 'room':
         try:
-            room = Room.objects.select_related('home').get(pk=origin_id)
+            room = Room.objects.select_related('home').get(pk=origin_id, deleted_at__isnull=True)
         except Room.DoesNotExist:
             raise ValueError('not_found')
         if room.home_id not in user_home_ids:
             raise ValueError('not_found')
         home_tag = (room.home_id, room.home.name)
         home_by_container = {}
-        seed_ids = set(Container.objects.filter(room_id=origin_id).values_list('id', flat=True))
+        seed_ids = set(
+            Container.objects.filter(room_id=origin_id, deleted_at__isnull=True).values_list('id', flat=True)
+        )
         for cid in seed_ids:
             home_by_container[cid] = home_tag
         container_ids = _expand_container_subtree(seed_ids, home_by_container)
@@ -212,14 +229,18 @@ def resolve_search_scope(user, scope, origin_type, origin_id):
 
     if origin_type == 'container':
         try:
-            origin_container = Container.objects.get(pk=origin_id)
+            origin_container = Container.objects.get(pk=origin_id, deleted_at__isnull=True)
         except Container.DoesNotExist:
             raise ValueError('not_found')
         home_tag = resolve_container_home(origin_container)
         if home_tag is None or home_tag[0] not in user_home_ids:
             raise ValueError('not_found')
         home_by_container = {origin_id: home_tag}
-        seed_ids = set(Container.objects.filter(parent_container_id=origin_id).values_list('id', flat=True))
+        seed_ids = set(
+            Container.objects.filter(parent_container_id=origin_id, deleted_at__isnull=True).values_list(
+                'id', flat=True
+            )
+        )
         for cid in seed_ids:
             home_by_container[cid] = home_tag
         container_ids = _expand_container_subtree(seed_ids, home_by_container)
@@ -233,3 +254,31 @@ def resolve_search_scope(user, scope, origin_type, origin_id):
         }
 
     raise ValueError('invalid_origin_type')
+
+
+def get_trash_entries_for_home(home):
+    """
+    Top-level trashed Rooms/Containers/Items for `home` - i.e. trashed nodes
+    whose immediate parent isn't *also* trashed. Cascaded descendants (same
+    deleted_at as their trashed ancestor) are excluded here since they're
+    implicitly covered by that ancestor's entry; anything trashed
+    independently still surfaces as its own entry.
+    """
+    rooms = list(Room.objects.filter(home=home, deleted_at__isnull=False))
+
+    all_container_ids = get_container_ids_for_home(home, include_trashed=True)
+    containers = list(
+        Container.objects.filter(id__in=all_container_ids, deleted_at__isnull=False)
+        .filter(Q(room__isnull=True) | Q(room__deleted_at__isnull=True))
+        .filter(Q(parent_container__isnull=True) | Q(parent_container__deleted_at__isnull=True))
+    )
+
+    items = list(
+        Item.objects.filter(
+            Q(room__home=home) | Q(container_id__in=all_container_ids), deleted_at__isnull=False
+        )
+        .filter(Q(room__isnull=True) | Q(room__deleted_at__isnull=True))
+        .filter(Q(container__isnull=True) | Q(container__deleted_at__isnull=True))
+    )
+
+    return rooms + containers + items

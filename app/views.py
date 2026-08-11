@@ -16,7 +16,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from django.core import signing
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
-from django.db import transaction
+from django.db import transaction, IntegrityError
 from django.shortcuts import render
 from rest_framework.exceptions import AuthenticationFailed, ValidationError
 from rest_framework import serializers, permissions
@@ -36,12 +36,13 @@ from .services.search_helpers import (
     get_container_subtree_ids,
     get_home_id_for_item,
     get_home_ids_for_user,
+    get_trash_entries_for_home,
 )
 from .services.username_helpers import generate_unique_username
 from .services.photo_helpers import ALLOWED_PHOTO_CONTENT_TYPES, delete_item_photo, presign_item_photo_upload
 
 from .models import CustomUser, PasswordResetToken, Room, Container, Item, ItemCheckout, Home, HomeMembership, StarredRoom, StarredContainer, StarredItem
-from .serializers import RegisterSerializer, IdentifySerializer, LoginSerializer, ResetPasswordSerializer, SetPasswordSerializer, ChildSerializer, NodeDetailsSerializer, ItemNodeDetailsSerializer, HomeSerializer, SearchResultSerializer, CheckedOutItemSerializer, StarredNodeSerializer
+from .serializers import RegisterSerializer, IdentifySerializer, LoginSerializer, ResetPasswordSerializer, SetPasswordSerializer, ChildSerializer, NodeDetailsSerializer, ItemNodeDetailsSerializer, HomeSerializer, SearchResultSerializer, CheckedOutItemSerializer, StarredNodeSerializer, TrashEntrySerializer
 from django.core.exceptions import ObjectDoesNotExist
 
 
@@ -747,7 +748,7 @@ def delete_account(request):
         .values_list('id', flat=True)
     )
     for home in Home.objects.filter(id__in=solo_home_ids):
-        container_ids = get_container_ids_for_home(home)
+        container_ids = get_container_ids_for_home(home, include_trashed=True)
         Item.objects.filter(Q(room__home=home) | Q(container_id__in=container_ids)).delete()
         home.delete()
 
@@ -911,21 +912,22 @@ def reset_password(request):
 
 def determine_children(node):
     """
-    Return a list of raw model instances
+    Return a list of raw model instances. Trashed nodes are excluded - they
+    only surface via the home's trash listing (get_trash_entries_for_home).
     """
     children = []
 
     if isinstance(node, Home):
-        children = list(Room.objects.filter(home=node).order_by("name"))
+        children = list(Room.objects.filter(home=node, deleted_at__isnull=True).order_by("name"))
 
     elif isinstance(node, Room):
-        containers = Container.objects.filter(room=node).order_by("name")
-        items = Item.objects.filter(room=node, container=None).order_by("name")
+        containers = Container.objects.filter(room=node, deleted_at__isnull=True).order_by("name")
+        items = Item.objects.filter(room=node, container=None, deleted_at__isnull=True).order_by("name")
         children = list(containers) + list(items)
 
     elif isinstance(node, Container):
-        containers = Container.objects.filter(parent_container=node).order_by("name")
-        items = Item.objects.filter(container=node).order_by("name")
+        containers = Container.objects.filter(parent_container=node, deleted_at__isnull=True).order_by("name")
+        items = Item.objects.filter(container=node, deleted_at__isnull=True).order_by("name")
         children = list(containers) + list(items)
 
     # Item: return empty list
@@ -949,11 +951,11 @@ def get_node(request, node_type, node_id):
                     status=status.HTTP_404_NOT_FOUND
                 )
         elif node_type == 'room':
-            node = Room.objects.get(pk=node_id)
+            node = Room.objects.get(pk=node_id, deleted_at__isnull=True)
         elif node_type == 'container':
-            node = Container.objects.get(pk=node_id)
+            node = Container.objects.get(pk=node_id, deleted_at__isnull=True)
         elif node_type == 'item':
-            node = Item.objects.get(pk=node_id)
+            node = Item.objects.get(pk=node_id, deleted_at__isnull=True)
         else:
             return Response(
                 {"message": "Invalid node_type"},
@@ -1031,7 +1033,7 @@ def create_container(request):
 
     if room_id:
         try:
-            room = Room.objects.get(pk=room_id)
+            room = Room.objects.get(pk=room_id, deleted_at__isnull=True)
         except ObjectDoesNotExist:
             return Response({"message": f"Room with id {room_id} not found."}, status=status.HTTP_404_NOT_FOUND)
         home_id = room.home_id
@@ -1039,7 +1041,7 @@ def create_container(request):
         create_kwargs = {"room": room}
     else:
         try:
-            parent = Container.objects.get(pk=parent_container_id)
+            parent = Container.objects.get(pk=parent_container_id, deleted_at__isnull=True)
         except ObjectDoesNotExist:
             return Response(
                 {"message": f"Container with id {parent_container_id} not found."},
@@ -1065,8 +1067,12 @@ def create_container(request):
 
 
 def _duplicate_item_name(name, room=None, container=None, exclude_id=None):
-    """Whether another Item with this name already lives in the same room/container."""
-    qs = Item.objects.filter(name=name, room=room) if room else Item.objects.filter(name=name, container=container)
+    """Whether another active Item with this name already lives in the same room/container."""
+    qs = (
+        Item.objects.filter(name=name, room=room, deleted_at__isnull=True)
+        if room
+        else Item.objects.filter(name=name, container=container, deleted_at__isnull=True)
+    )
     if exclude_id is not None:
         qs = qs.exclude(pk=exclude_id)
     return qs.exists()
@@ -1090,14 +1096,14 @@ def create_item(request):
 
     if room_id:
         try:
-            room = Room.objects.get(pk=room_id)
+            room = Room.objects.get(pk=room_id, deleted_at__isnull=True)
         except ObjectDoesNotExist:
             return Response({"message": f"Room with id {room_id} not found."}, status=status.HTTP_404_NOT_FOUND)
         home_id = room.home_id
         create_kwargs = {"room": room}
     else:
         try:
-            container = Container.objects.get(pk=container_id)
+            container = Container.objects.get(pk=container_id, deleted_at__isnull=True)
         except ObjectDoesNotExist:
             return Response(
                 {"message": f"Container with id {container_id} not found."}, status=status.HTTP_404_NOT_FOUND
@@ -1131,19 +1137,20 @@ def create_item(request):
 
 def _get_member_node_or_error(request, node_type, node_id):
     """
-    Look up a Room/Container/Item by id and confirm the requester is a member
-    of its owning home. Returns (node, None) on success, or (None,
-    error_response) otherwise.
+    Look up an active (non-trashed) Room/Container/Item by id and confirm the
+    requester is a member of its owning home. Returns (node, None) on
+    success, or (None, error_response) otherwise. Trashed nodes 404 here -
+    they're frozen until restored or purged from the home's trash.
     """
     if node_type == 'room':
         try:
-            node = Room.objects.get(pk=node_id)
+            node = Room.objects.get(pk=node_id, deleted_at__isnull=True)
         except ObjectDoesNotExist:
             return None, Response({"message": f"Room with id {node_id} not found."}, status=status.HTTP_404_NOT_FOUND)
         home_id = node.home_id
     elif node_type == 'container':
         try:
-            node = Container.objects.get(pk=node_id)
+            node = Container.objects.get(pk=node_id, deleted_at__isnull=True)
         except ObjectDoesNotExist:
             return None, Response(
                 {"message": f"Container with id {node_id} not found."}, status=status.HTTP_404_NOT_FOUND
@@ -1152,7 +1159,7 @@ def _get_member_node_or_error(request, node_type, node_id):
         home_id = home_tag[0] if home_tag else None
     elif node_type == 'item':
         try:
-            node = Item.objects.get(pk=node_id)
+            node = Item.objects.get(pk=node_id, deleted_at__isnull=True)
         except ObjectDoesNotExist:
             return None, Response({"message": f"Item with id {node_id} not found."}, status=status.HTTP_404_NOT_FOUND)
         home_id = get_home_id_for_item(node)
@@ -1282,24 +1289,144 @@ def rename_node(request, node_type, node_id):
 @api_view(['POST'])
 def delete_node(request, node_type, node_id):
     """
-    Delete a Room, Container, or Item. Any member of the owning home may do
-    this. Room/Container deletes clean up descendant Items explicitly first —
-    Item.room/Item.container are SET_NULL (not CASCADE), so left to Django's
-    cascade collector they'd survive as orphans with both fields null.
+    Move a Room, Container, or Item to the home's trash. Any member of the
+    owning home may do this; only the home's owner can recover or
+    permanently delete it from there (see restore_node,
+    permanently_delete_node). Not-yet-trashed descendants are stamped with
+    the same deleted_at so a later restore can tell them apart from anything
+    trashed independently and earlier.
     """
     node, error = _get_member_node_or_error(request, node_type, node_id)
     if error:
         return error
 
+    now = timezone.now()
     if node_type == 'room':
         container_ids = get_container_ids_under_room(node)
+        Container.objects.filter(id__in=container_ids, deleted_at__isnull=True).update(deleted_at=now)
+        Item.objects.filter(
+            Q(room=node) | Q(container_id__in=container_ids), deleted_at__isnull=True
+        ).update(deleted_at=now)
+    elif node_type == 'container':
+        container_ids = get_container_subtree_ids(node)  # includes node's own id
+        Container.objects.filter(id__in=container_ids, deleted_at__isnull=True).exclude(pk=node.pk).update(
+            deleted_at=now
+        )
+        Item.objects.filter(container_id__in=container_ids, deleted_at__isnull=True).update(deleted_at=now)
+    # item: a leaf, no descendants to cascade.
+
+    node.deleted_at = now
+    node.save(update_fields=['deleted_at', 'updated_at'])
+    return Response({"status": "ok"}, status=status.HTTP_200_OK)
+
+
+def _get_creator_node_or_error(request, node_type, node_id, require_trashed=False):
+    """
+    Look up a Room/Container/Item by id, ignoring trash state, and confirm
+    the requester is the creator of its owning home. Used by restore/
+    permanent-delete, which operate on trashed nodes and are restricted to
+    the home's owner (mirrors _get_creator_home_or_error). Returns (node,
+    None) on success, or (None, error_response) otherwise.
+    """
+    model = _NODE_MODEL_BY_TYPE.get(node_type)
+    if model is None:
+        return None, Response({"message": "Invalid node_type"}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        node = model.objects.get(pk=node_id)
+    except ObjectDoesNotExist:
+        return None, Response({"message": f"{node_type} with id {node_id} not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if node_type == 'room':
+        home_id = node.home_id
+    elif node_type == 'container':
+        home_tag = resolve_container_home(node)
+        home_id = home_tag[0] if home_tag else None
+    else:
+        home_id = get_home_id_for_item(node)
+
+    home = Home.objects.filter(pk=home_id).first() if home_id else None
+    if not home or home.created_by_id != request.user.id:
+        return None, Response({"message": f"{node_type} with id {node_id} not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if require_trashed and node.deleted_at is None:
+        return None, Response(
+            {"message": f"{node_type} with id {node_id} is not in the trash."}, status=status.HTTP_404_NOT_FOUND
+        )
+
+    return node, None
+
+
+@api_view(['POST'])
+def restore_node(request, node_type, node_id):
+    """
+    Recover a trashed Room/Container/Item back to where it was. Only the
+    home's owner may do this. Descendants stamped with the same deleted_at
+    (i.e. trashed in the same cascade) come back too; anything trashed
+    independently/earlier stays in the trash as its own entry.
+    """
+    node, error = _get_creator_node_or_error(request, node_type, node_id, require_trashed=True)
+    if error:
+        return error
+
+    if node_type == 'item' and _duplicate_item_name(node.name, room=node.room, container=node.container, exclude_id=node.id):
+        return Response(
+            {"message": f'An item named "{node.name}" already exists here.'}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    deleted_at = node.deleted_at
+    try:
+        with transaction.atomic():
+            node.deleted_at = None
+            node.save(update_fields=['deleted_at', 'updated_at'])
+
+            if node_type == 'room':
+                container_ids = get_container_ids_under_room(node, include_trashed=True)
+                Container.objects.filter(id__in=container_ids, deleted_at=deleted_at).update(deleted_at=None)
+                Item.objects.filter(
+                    Q(room=node) | Q(container_id__in=container_ids), deleted_at=deleted_at
+                ).update(deleted_at=None)
+            elif node_type == 'container':
+                container_ids = get_container_subtree_ids(node, include_trashed=True)  # includes node's own id
+                Container.objects.filter(id__in=container_ids, deleted_at=deleted_at).exclude(pk=node.pk).update(
+                    deleted_at=None
+                )
+                Item.objects.filter(container_id__in=container_ids, deleted_at=deleted_at).update(deleted_at=None)
+    except IntegrityError:
+        return Response(
+            {
+                "message": "Restoring this would conflict with an existing name. "
+                           "Rename the conflicting item and try again."
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    return Response({"status": "ok"}, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def permanently_delete_node(request, node_type, node_id):
+    """
+    Permanently delete a trashed Room, Container, or Item. Only the home's
+    owner may do this. Room/Container deletes clean up descendant Items
+    explicitly first — Item.room/Item.container are SET_NULL (not CASCADE),
+    so left to Django's cascade collector they'd survive as orphans with
+    both fields null. Descendant Containers cascade-delete for free via
+    their own on_delete=CASCADE.
+    """
+    node, error = _get_creator_node_or_error(request, node_type, node_id, require_trashed=True)
+    if error:
+        return error
+
+    if node_type == 'room':
+        container_ids = get_container_ids_under_room(node, include_trashed=True)
         items = Item.objects.filter(Q(room=node) | Q(container_id__in=container_ids))
         for picture in items.values_list('picture', flat=True):
             if picture:
                 delete_item_photo(picture)
         items.delete()
     elif node_type == 'container':
-        container_ids = get_container_subtree_ids(node)
+        container_ids = get_container_subtree_ids(node, include_trashed=True)
         items = Item.objects.filter(container_id__in=container_ids)
         for picture in items.values_list('picture', flat=True):
             if picture:
@@ -1310,6 +1437,19 @@ def delete_node(request, node_type, node_id):
 
     node.delete()
     return Response({"status": "ok"}, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+def get_home_trash(request, home_id):
+    """List a home's top-level trashed Rooms/Containers/Items. Owner-only."""
+    home, error = _get_creator_home_or_error(request, home_id)
+    if error:
+        return error
+
+    entries = get_trash_entries_for_home(home)
+    entries.sort(key=lambda n: n.deleted_at, reverse=True)
+    serialized = TrashEntrySerializer(entries, many=True, context={'starred_keys': set()})
+    return Response({"trash": serialized.data}, status=status.HTTP_200_OK)
 
 
 @api_view(['POST'])
@@ -1425,7 +1565,7 @@ def move_item(request, item_id):
 
     if room_id:
         try:
-            room = Room.objects.get(pk=room_id)
+            room = Room.objects.get(pk=room_id, deleted_at__isnull=True)
         except ObjectDoesNotExist:
             return Response({"message": f"Room with id {room_id} not found."}, status=status.HTTP_404_NOT_FOUND)
         if item.room_id == room.id:
@@ -1434,7 +1574,7 @@ def move_item(request, item_id):
         new_room, new_container = room, None
     else:
         try:
-            container = Container.objects.get(pk=container_id)
+            container = Container.objects.get(pk=container_id, deleted_at__isnull=True)
         except ObjectDoesNotExist:
             return Response(
                 {"message": f"Container with id {container_id} not found."}, status=status.HTTP_404_NOT_FOUND
@@ -1645,6 +1785,7 @@ def search_nodes(request):
 
     items = list(Item.objects.annotate(tag_match=tag_match).filter(
         Q(room_id__in=result_scope['item_room_ids']) | Q(container_id__in=result_scope['item_container_ids']),
+        deleted_at__isnull=True,
     ).filter(
         Q(name__icontains=q) | Q(category__icontains=q) | Q(tag_match=True)
     ))
@@ -1669,7 +1810,7 @@ def search_nodes(request):
 @api_view(['GET'])
 def checked_out_items(request):
     """All items the requesting user currently has checked out, across every home they belong to."""
-    checkouts = ItemCheckout.objects.filter(user=request.user).select_related(
+    checkouts = ItemCheckout.objects.filter(user=request.user, item__deleted_at__isnull=True).select_related(
         'item', 'item__room__home', 'item__container'
     )
 
@@ -1699,14 +1840,16 @@ def starred_nodes(request):
     user_home_ids = get_home_ids_for_user(request.user)
     nodes = []
 
-    for starred in StarredRoom.objects.filter(user=request.user, room__home_id__in=user_home_ids).select_related(
-        'room__home'
-    ):
+    for starred in StarredRoom.objects.filter(
+        user=request.user, room__home_id__in=user_home_ids, room__deleted_at__isnull=True
+    ).select_related('room__home'):
         room = starred.room
         room.home_id, room.home_name = room.home_id, room.home.name
         nodes.append(room)
 
-    for starred in StarredContainer.objects.filter(user=request.user).select_related('container'):
+    for starred in StarredContainer.objects.filter(
+        user=request.user, container__deleted_at__isnull=True
+    ).select_related('container'):
         container = starred.container
         home_tag = resolve_container_home(container)
         if not home_tag or home_tag[0] not in user_home_ids:
@@ -1714,7 +1857,9 @@ def starred_nodes(request):
         container.home_id, container.home_name = home_tag
         nodes.append(container)
 
-    for starred in StarredItem.objects.filter(user=request.user).select_related('item__room__home', 'item__container'):
+    for starred in StarredItem.objects.filter(
+        user=request.user, item__deleted_at__isnull=True
+    ).select_related('item__room__home', 'item__container'):
         item = starred.item
         home_id = get_home_id_for_item(item)
         if home_id not in user_home_ids:
@@ -1856,8 +2001,9 @@ def delete_home(request, home_id):
     # violating Item.clean()'s "must belong to room or container" invariant.
     # Delete them explicitly first. Containers can be nested up to 5 levels,
     # so a plain `container__room__home` match only catches level-1 containers
-    # — walk the full subtree to also catch items nested deeper.
-    container_ids = get_container_ids_for_home(home)
+    # — walk the full subtree to also catch items nested deeper. include_trashed=True
+    # so items in trashed rooms/containers are cleaned up too, not just active ones.
+    container_ids = get_container_ids_for_home(home, include_trashed=True)
     Item.objects.filter(Q(room__home=home) | Q(container_id__in=container_ids)).delete()
     home.delete()
 

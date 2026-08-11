@@ -1,9 +1,14 @@
+from pathlib import Path
+
 from django.conf import settings
 from rest_framework import serializers
 from django.contrib.auth import get_user_model, authenticate
 from django.contrib.auth.password_validation import validate_password
 from django.core import signing
-from django.core.mail import send_mail
+from django.core.mail import EmailMultiAlternatives
+from django.template.loader import render_to_string
+from django.utils import timezone
+from email.mime.image import MIMEImage
 from rest_framework.exceptions import AuthenticationFailed
 from django.core.signing import TimestampSigner
 from .models import CustomUser, Room, Container, Item, HomeMembership, Home
@@ -100,13 +105,30 @@ class RegisterSerializer(serializers.Serializer):
         # Trying with Scheme. I change my mind. To support cross-platform, I will keep the verification url as a web-based URL. I also still have not figured out how to make the deep link work.
         # verification_url = f"itemory://VerifyEmailPage/?token={token}"
 
-        send_mail(
+        logo_cid = "app_logo"
+        html_message = render_to_string("emails/verify_email.html", {
+            "verification_url": verification_url,
+            "user_email": user.email,
+            "logo_cid": logo_cid,
+            "current_year": timezone.now().year,
+        })
+
+        email = EmailMultiAlternatives(
             subject="Verify your email address",
-            message=f"Click here to verify: {verification_url}",
+            body=f"Click here to verify: {verification_url}",
             from_email="itemoryapp@gmail.com",
-            recipient_list=[user.email],
-            fail_silently=False,  # Will raise smtplib.SMTPException if an error occurs
+            to=[user.email],
         )
+        email.attach_alternative(html_message, "text/html")
+        email.mixed_subtype = "related"  # keeps the inline image attached to the HTML part, not shown as a separate attachment
+
+        logo_path = Path(settings.BASE_DIR) / "app" / "static" / "images" / "logo.png"
+        logo_image = MIMEImage(logo_path.read_bytes())
+        logo_image.add_header("Content-ID", f"<{logo_cid}>")
+        logo_image.add_header("Content-Disposition", "inline", filename="logo.png")
+        email.attach(logo_image)
+
+        email.send(fail_silently=False)  # Will raise smtplib.SMTPException if an error occurs
 
 
 class ResetPasswordSerializer(serializers.Serializer):
@@ -229,6 +251,11 @@ class ChildSerializer(serializers.Serializer):
         """
         starred_keys = self.context.get('starred_keys') or set()
         return (self.get_type(obj), obj.id) in starred_keys
+
+
+class TrashEntrySerializer(ChildSerializer):
+    """A top-level trashed room/container/item, as listed in a home's trash."""
+    deleted_at = serializers.DateTimeField()
 
 
 class SearchResultSerializer(ChildSerializer):

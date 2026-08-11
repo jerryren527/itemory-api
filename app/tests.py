@@ -1,5 +1,5 @@
 from django.test import TestCase
-from rest_framework.test import APITestCase
+from rest_framework.test import APITestCase, APIClient
 from django.urls import reverse
 from rest_framework import status
 from django.contrib.auth import get_user_model
@@ -1123,3 +1123,223 @@ class OptimisticConcurrencyTests(APITestCase):
         self.assertIn("updated_at", response.data)
         self.item.refresh_from_db()
         self.assertEqual(self.item.description, "A blender")
+
+
+class TrashTests(APITestCase):
+    """
+    delete_node moves a Room/Container/Item to trash instead of removing it,
+    cascading a shared deleted_at down to not-yet-trashed descendants.
+    restore_node/permanently_delete_node/get_home_trash are owner-only.
+    """
+
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            email="trashowner@example.com", password="Pass123!", email_verified=True,
+        )
+        self.collaborator = User.objects.create_user(
+            email="trashcollab@example.com", password="Pass123!", email_verified=True,
+        )
+
+        self.home = Home.objects.create(name="Trash Home", created_by=self.owner)
+        HomeMembership.objects.create(user=self.owner, home=self.home)
+        HomeMembership.objects.create(user=self.collaborator, home=self.home)
+
+        self.room = Room.objects.create(name="Kitchen", home=self.home, created_by=self.owner)
+        self.container = Container.objects.create(
+            name="Cabinet", room=self.room, level=1, created_by=self.owner,
+        )
+        self.room_item = Item.objects.create(name="Blender", room=self.room, created_by=self.owner)
+        self.container_item = Item.objects.create(name="Mug", container=self.container, created_by=self.owner)
+
+        owner_refresh = RefreshToken.for_user(self.owner)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {owner_refresh.access_token}")
+
+        self.collab_client = APIClient()
+        collab_refresh = RefreshToken.for_user(self.collaborator)
+        self.collab_client.credentials(HTTP_AUTHORIZATION=f"Bearer {collab_refresh.access_token}")
+
+    def _delete(self, client, node_type, node_id):
+        return client.post(reverse("app:delete-node", args=[node_type, node_id]), format="json")
+
+    def _restore(self, client, node_type, node_id):
+        return client.post(reverse("app:restore-node", args=[node_type, node_id]), format="json")
+
+    def _purge(self, client, node_type, node_id):
+        return client.post(reverse("app:permanently-delete-node", args=[node_type, node_id]), format="json")
+
+    # --- delete_node (soft delete) ---
+
+    def test_delete_room_by_collaborator_soft_deletes_and_cascades(self):
+        response = self._delete(self.collab_client, "room", self.room.id)
+        self.assertEqual(response.status_code, 200)
+
+        self.room.refresh_from_db()
+        self.container.refresh_from_db()
+        self.room_item.refresh_from_db()
+        self.container_item.refresh_from_db()
+
+        self.assertIsNotNone(self.room.deleted_at)
+        self.assertEqual(self.container.deleted_at, self.room.deleted_at)
+        self.assertEqual(self.room_item.deleted_at, self.room.deleted_at)
+        self.assertEqual(self.container_item.deleted_at, self.room.deleted_at)
+
+        # Rows still exist in the DB - this is a soft delete.
+        self.assertTrue(Room.objects.filter(pk=self.room.id).exists())
+
+    def test_delete_item_soft_deletes_leaf_only(self):
+        response = self._delete(self.client, "item", self.room_item.id)
+        self.assertEqual(response.status_code, 200)
+        self.room_item.refresh_from_db()
+        self.assertIsNotNone(self.room_item.deleted_at)
+        self.container.refresh_from_db()
+        self.assertIsNone(self.container.deleted_at)
+
+    def test_independently_trashed_descendant_keeps_own_timestamp(self):
+        self._delete(self.client, "item", self.container_item.id)
+        self.container_item.refresh_from_db()
+        item_deleted_at = self.container_item.deleted_at
+        self.assertIsNotNone(item_deleted_at)
+
+        self._delete(self.client, "room", self.room.id)
+        self.room.refresh_from_db()
+        self.container.refresh_from_db()
+        self.container_item.refresh_from_db()
+
+        self.assertEqual(self.container.deleted_at, self.room.deleted_at)
+        self.assertEqual(self.container_item.deleted_at, item_deleted_at)
+        self.assertNotEqual(self.container_item.deleted_at, self.room.deleted_at)
+
+    def test_deleted_room_excluded_from_home_tree(self):
+        self._delete(self.client, "room", self.room.id)
+        response = self.client.get(reverse("app:get-node", args=["home", self.home.id]))
+        room_ids = [c["id"] for c in response.data["children"]]
+        self.assertNotIn(self.room.id, room_ids)
+
+    # --- get_home_trash ---
+
+    def test_get_home_trash_lists_top_level_entries_only(self):
+        self._delete(self.client, "room", self.room.id)
+        response = self.client.get(reverse("app:get-home-trash", args=[self.home.id]))
+        self.assertEqual(response.status_code, 200)
+        entries = response.data["trash"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["id"], self.room.id)
+        self.assertEqual(entries[0]["type"], "room")
+
+    def test_get_home_trash_forbidden_for_non_owner(self):
+        response = self.collab_client.get(reverse("app:get-home-trash", args=[self.home.id]))
+        self.assertEqual(response.status_code, 403)
+
+    # --- restore_node ---
+
+    def test_owner_can_restore_room_and_cascade(self):
+        self._delete(self.client, "room", self.room.id)
+        response = self._restore(self.client, "room", self.room.id)
+        self.assertEqual(response.status_code, 200)
+
+        self.room.refresh_from_db()
+        self.container.refresh_from_db()
+        self.room_item.refresh_from_db()
+        self.container_item.refresh_from_db()
+        self.assertIsNone(self.room.deleted_at)
+        self.assertIsNone(self.container.deleted_at)
+        self.assertIsNone(self.room_item.deleted_at)
+        self.assertIsNone(self.container_item.deleted_at)
+
+    def test_restore_leaves_independently_trashed_descendant_alone(self):
+        self._delete(self.client, "item", self.container_item.id)
+        self._delete(self.client, "room", self.room.id)
+        self._restore(self.client, "room", self.room.id)
+
+        self.container_item.refresh_from_db()
+        self.assertIsNotNone(self.container_item.deleted_at)
+
+    def test_restore_forbidden_for_non_owner(self):
+        self._delete(self.client, "room", self.room.id)
+        response = self._restore(self.collab_client, "room", self.room.id)
+        self.assertEqual(response.status_code, 404)
+
+    def test_restore_active_node_returns_404(self):
+        response = self._restore(self.client, "room", self.room.id)
+        self.assertEqual(response.status_code, 404)
+
+    def test_restore_item_name_collision_returns_400(self):
+        self._delete(self.client, "item", self.room_item.id)
+        Item.objects.create(name="Blender", room=self.room, created_by=self.owner)
+        response = self._restore(self.client, "item", self.room_item.id)
+        self.assertEqual(response.status_code, 400)
+
+    # --- permanently_delete_node ---
+
+    @patch("app.views.delete_item_photo")
+    def test_owner_can_permanently_delete_and_photo_is_cleaned_up(self, mock_delete_photo):
+        item = Item.objects.create(
+            name="Toaster", room=self.room, created_by=self.owner, picture="https://example.com/toaster.jpg",
+        )
+        self._delete(self.client, "item", item.id)
+        response = self._purge(self.client, "item", item.id)
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Item.objects.filter(pk=item.id).exists())
+        mock_delete_photo.assert_called_once_with("https://example.com/toaster.jpg")
+
+    def test_permanently_delete_forbidden_for_non_owner(self):
+        self._delete(self.client, "item", self.room_item.id)
+        response = self._purge(self.collab_client, "item", self.room_item.id)
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(Item.objects.filter(pk=self.room_item.id).exists())
+
+    def test_permanently_delete_active_node_returns_404(self):
+        response = self._purge(self.client, "item", self.room_item.id)
+        self.assertEqual(response.status_code, 404)
+
+    def test_permanently_delete_room_purges_full_subtree_including_independent_trash(self):
+        self._delete(self.client, "item", self.container_item.id)  # trashed independently, earlier
+        self._delete(self.client, "room", self.room.id)
+        response = self._purge(self.client, "room", self.room.id)
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Room.objects.filter(pk=self.room.id).exists())
+        self.assertFalse(Container.objects.filter(pk=self.container.id).exists())
+        self.assertFalse(Item.objects.filter(pk=self.container_item.id).exists())
+
+    # --- trash-awareness elsewhere ---
+
+    def test_duplicate_item_name_allowed_after_original_is_trashed(self):
+        self._delete(self.client, "item", self.room_item.id)
+        response = self.client.post(
+            reverse("app:create-item"), {"name": "Blender", "room_id": self.room.id}, format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+
+    def test_cannot_create_item_under_trashed_room(self):
+        self._delete(self.client, "room", self.room.id)
+        response = self.client.post(
+            reverse("app:create-item"), {"name": "Kettle", "room_id": self.room.id}, format="json",
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_trashed_item_cannot_be_renamed(self):
+        self._delete(self.client, "item", self.room_item.id)
+        response = self.client.post(
+            reverse("app:rename-node", args=["item", self.room_item.id]), {"name": "New Name"}, format="json",
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_search_excludes_trashed_room(self):
+        self._delete(self.client, "room", self.room.id)
+        response = self.client.get(reverse("app:search-nodes"), {"q": "Kitchen", "scope": "everywhere"})
+        result_ids = [r["id"] for r in response.data["results"] if r["type"] == "room"]
+        self.assertNotIn(self.room.id, result_ids)
+
+    def test_checked_out_items_excludes_trashed_item(self):
+        self.client.post(reverse("app:checkout-item", args=[self.room_item.id]), {"quantity": 1}, format="json")
+        self._delete(self.client, "item", self.room_item.id)
+        response = self.client.get(reverse("app:checked-out-items"))
+        result_ids = [r["id"] for r in response.data["results"]]
+        self.assertNotIn(self.room_item.id, result_ids)
+
+    def test_starred_nodes_excludes_trashed_item(self):
+        self.client.post(reverse("app:star-node", args=["item", self.room_item.id]), format="json")
+        self._delete(self.client, "item", self.room_item.id)
+        response = self.client.get(reverse("app:starred-nodes"))
+        result_ids = [r["id"] for r in response.data["results"]]
+        self.assertNotIn(self.room_item.id, result_ids)
