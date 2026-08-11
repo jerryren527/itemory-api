@@ -37,29 +37,13 @@
         }
 
         .icon {
-            width: 76px;
-            height: 76px;
+            display: block;
+            width: 72px;
+            height: 72px;
             margin: 0 auto 1.5rem;
-            border-radius: 50%;
-            background: linear-gradient(135deg, #f87171, #ef4444);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            box-shadow: 0 8px 20px rgba(239, 68, 68, 0.3);
+            border-radius: 18px;
+            box-shadow: 0 8px 20px rgba(37, 99, 235, 0.25);
             animation: pop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) 0.1s both;
-        }
-
-        .icon svg {
-            width: 30px;
-            height: 30px;
-            stroke: #ffffff;
-            stroke-width: 3;
-            fill: none;
-            stroke-linecap: round;
-            stroke-linejoin: round;
-            stroke-dasharray: 24;
-            stroke-dashoffset: 24;
-            animation: draw 0.4s ease-out 0.4s forwards;
         }
 
         .badge {
@@ -111,10 +95,6 @@
             100% { transform: scale(1); opacity: 1; }
         }
 
-        @keyframes draw {
-            to { stroke-dashoffset: 0; }
-        }
-
         @media (prefers-color-scheme: dark) {
             body {
                 background: radial-gradient(circle at top, #450a0a 0%, #0b0f19 55%, #0b0f19 100%);
@@ -143,9 +123,7 @@
 </head>
 <body>
   <div class="container">
-    <div class="icon">
-      <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
-    </div>
+    <img class="icon" src="/static/images/logo.png" alt="Itemory">
     <span class="badge">Failed</span>
     <h1>Verification failed</h1>
     <p>{{ error_message|default:"We couldn't verify your email address. The link may be invalid or expired." }}</p>

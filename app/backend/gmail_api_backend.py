@@ -1,5 +1,4 @@
 import base64
-from email.mime.text import MIMEText
 
 import requests
 from django.conf import settings
@@ -40,10 +39,11 @@ class GmailAPIBackend(BaseEmailBackend):
         sent_count = 0
 
         for message in email_messages:
-            mime_message = MIMEText(message.body)
-            mime_message["To"] = ", ".join(message.to)
-            mime_message["From"] = message.from_email
-            mime_message["Subject"] = message.subject
+            # message.message() builds the full MIME tree (plain body, HTML
+            # alternatives, inline/attached files, headers) the same way
+            # Django's SMTP backend would send it, so HTML emails and inline
+            # images (e.g. the verification email's logo) aren't dropped.
+            mime_message = message.message()
 
             raw = base64.urlsafe_b64encode(mime_message.as_bytes()).decode("ascii")
 

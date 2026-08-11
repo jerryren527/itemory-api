@@ -9,6 +9,14 @@
       color-scheme: light dark;
     }
 
+    .logo {
+      display: block;
+      width: 40px;
+      height: 40px;
+      margin: 0 0 1.25rem;
+      border-radius: 10px;
+    }
+
     * {
       box-sizing: border-box;
     }
@@ -30,6 +38,7 @@
       box-shadow: 0 20px 45px rgba(17, 24, 39, 0.08), 0 2px 6px rgba(17, 24, 39, 0.04);
       max-width: 720px;
       width: 100%;
+      animation: rise 0.5s ease-out;
     }
 
     h1 {
@@ -60,7 +69,7 @@
     }
 
     a {
-      color: #4f46e5;
+      color: #6366f1;
     }
 
     .contact {
@@ -69,19 +78,24 @@
       border-top: 1px solid #e5e7eb;
     }
 
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(12px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
     @media (prefers-color-scheme: dark) {
       body {
-        background: #0b0b10;
+        background: radial-gradient(circle at top, #1e1b4b 0%, #0b0f19 55%, #0b0f19 100%);
+        color: #f3f4f6;
       }
 
       .container {
-        background: #16161d;
-        box-shadow: none;
-        border: 1px solid #26262f;
+        background: #131826;
+        box-shadow: 0 20px 45px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.3);
       }
 
       h1, h2 {
-        color: #f9fafb;
+        color: #f3f4f6;
       }
 
       p, li {
@@ -93,11 +107,11 @@
       }
 
       .contact {
-        border-top-color: #26262f;
+        border-top-color: #1f2937;
       }
 
       a {
-        color: #818cf8;
+        color: #a5b4fc;
       }
     }
   </style>
@@ -105,6 +119,7 @@
 
 <body>
   <div class="container">
+    <img class="logo" src="/static/images/logo.png" alt="Itemory">
     <h1>Itemory Privacy Policy</h1>
     <p class="updated">Last updated: July 31, 2026</p>
 

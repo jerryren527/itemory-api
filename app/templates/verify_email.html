@@ -37,29 +37,13 @@
         }
 
         .icon {
-            width: 76px;
-            height: 76px;
+            display: block;
+            width: 72px;
+            height: 72px;
             margin: 0 auto 1.5rem;
-            border-radius: 50%;
-            background: linear-gradient(135deg, #34d399, #10b981);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            box-shadow: 0 8px 20px rgba(16, 185, 129, 0.3);
+            border-radius: 18px;
+            box-shadow: 0 8px 20px rgba(37, 99, 235, 0.25);
             animation: pop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) 0.1s both;
-        }
-
-        .icon svg {
-            width: 34px;
-            height: 34px;
-            stroke: #ffffff;
-            stroke-width: 3;
-            fill: none;
-            stroke-linecap: round;
-            stroke-linejoin: round;
-            stroke-dasharray: 24;
-            stroke-dashoffset: 24;
-            animation: draw 0.4s ease-out 0.4s forwards;
         }
 
         .badge {
@@ -111,10 +95,6 @@
             100% { transform: scale(1); opacity: 1; }
         }
 
-        @keyframes draw {
-            to { stroke-dashoffset: 0; }
-        }
-
         @media (prefers-color-scheme: dark) {
             body {
                 background: radial-gradient(circle at top, #1e1b4b 0%, #0b0f19 55%, #0b0f19 100%);
@@ -143,9 +123,7 @@
 </head>
 <body>
   <div class="container">
-    <div class="icon">
-      <svg viewBox="0 0 24 24"><path d="M4 12l6 6L20 6" /></svg>
-    </div>
+    <img class="icon" src="/static/images/logo.png" alt="Itemory">
     <span class="badge">Verified</span>
     <h1>Email confirmed</h1>
     <p>Your email address has been successfully verified. You're all set to continue using Itemory.</p>
