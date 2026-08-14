@@ -238,6 +238,7 @@ class ChildSerializer(serializers.Serializer):
     quantity = serializers.SerializerMethodField()
     expiration_date = serializers.SerializerMethodField()
     is_starred = serializers.SerializerMethodField()
+    updated_at = serializers.DateTimeField()
 
     def get_type(self, obj):
         if isinstance(obj, Room):
@@ -307,10 +308,8 @@ class StarredNodeSerializer(SearchResultSerializer):
     """
     A room/container/item the requesting user has starred, tagged with the
     home it lives in (home_id/home_name attached as ad hoc attributes on the
-    raw model instance before serializing - see starred_nodes) plus
-    updated_at, a genuine field on Room/Container/Item.
+    raw model instance before serializing - see starred_nodes).
     """
-    updated_at = serializers.DateTimeField()
 
     def get_is_starred(self, obj):
         # Every node in this list is starred by definition - no need to
