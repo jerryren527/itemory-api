@@ -20,7 +20,6 @@ from django.db import transaction, IntegrityError
 from django.shortcuts import render
 from rest_framework.exceptions import AuthenticationFailed, ValidationError
 from rest_framework import serializers, permissions
-from django.core.mail import send_mail
 from django.core.signing import TimestampSigner
 from datetime import timedelta, datetime
 from django.contrib.auth import authenticate
@@ -792,13 +791,7 @@ def send_reset_password_email(request):
 
             print('Sending Email...')
 
-            send_mail(
-                subject="Reset Itemory Password",
-                message=f"Click here to reset your password: {verification_url}.",
-                from_email="itemoryapp@gmail.com",
-                recipient_list=[user.email],
-                fail_silently=False,  # Will raise smtplib.SMTPException if an error occurs
-            )
+            identify_serializer.send_reset_password_email(user, verification_url)
         except Exception as err:
             print('err:', err)
 
@@ -885,6 +878,7 @@ def reset_password(request):
 
                 # update user password here
                 user.set_password(password)
+                user.has_password = True
                 user.save()
                 return render(request, 'reset_password_success.html')
             else:
@@ -1123,7 +1117,7 @@ def create_item(request):
     item = Item.objects.create(
         name=name,
         description=request.data.get('description') or None,
-        quantity=request.data.get('quantity') or 1,
+        quantity=request.data.get('quantity') if request.data.get('quantity') is not None else 1,
         category=request.data.get('category') or None,
         expiration_date=request.data.get('expiration_date') or None,
         comment=request.data.get('comment') or None,
@@ -1497,7 +1491,7 @@ def update_item(request, item_id):
                 {"message": f'An item named "{name}" already exists here.'}, status=status.HTTP_400_BAD_REQUEST
             )
     if 'quantity' in data:
-        new_quantity = data.get('quantity') or 1
+        new_quantity = data.get('quantity')
         checked_out = sum(item.checkouts.values_list('quantity', flat=True))
         if new_quantity < checked_out:
             return Response(

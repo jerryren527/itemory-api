@@ -36,6 +36,32 @@ class IdentifySerializer(serializers.Serializer):
         else:
             return None
 
+    def send_reset_password_email(self, user, verification_url):
+        logo_cid = "app_logo"
+        html_message = render_to_string("emails/reset_password.html", {
+            "verification_url": verification_url,
+            "user_email": user.email,
+            "logo_cid": logo_cid,
+            "current_year": timezone.now().year,
+        })
+
+        email = EmailMultiAlternatives(
+            subject="Reset Itemory Password",
+            body=f"Click here to reset your password: {verification_url}",
+            from_email="itemoryapp@gmail.com",
+            to=[user.email],
+        )
+        email.attach_alternative(html_message, "text/html")
+        email.mixed_subtype = "related"  # keeps the inline image attached to the HTML part, not shown as a separate attachment
+
+        logo_path = Path(settings.BASE_DIR) / "app" / "static" / "images" / "logo.png"
+        logo_image = MIMEImage(logo_path.read_bytes())
+        logo_image.add_header("Content-ID", f"<{logo_cid}>")
+        logo_image.add_header("Content-Disposition", "inline", filename="logo.png")
+        email.attach(logo_image)
+
+        email.send(fail_silently=False)  # Will raise smtplib.SMTPException if an error occurs
+
 
 class LoginSerializer(serializers.Serializer):
     # serializers.Serializer class gives you access to is_valid() and .errors property
