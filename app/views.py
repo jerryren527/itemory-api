@@ -1534,38 +1534,51 @@ def update_item(request, item_id):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+    # Captured before the lock attempt, since a failed lock leaves `item`
+    # unset - needed to tell a genuinely new picture apart from a resend of
+    # the current one, so a lock conflict doesn't orphan a fresh upload.
+    picture_before_lock = item.picture
     old_picture = None
+    orphaned_picture = None
     with transaction.atomic():
         item, error = _optimistic_lock_or_error(Item, item.pk, data.get('expected_updated_at'), 'item')
         if error:
-            return error
+            if 'picture' in data:
+                new_picture = data.get('picture') or None
+                if new_picture and new_picture != picture_before_lock:
+                    orphaned_picture = new_picture
+        else:
+            if 'name' in data:
+                item.name = name
+            if 'description' in data:
+                item.description = data.get('description') or None
+            if 'quantity' in data:
+                item.quantity = new_quantity
+            if 'category' in data:
+                item.category = data.get('category') or None
+            if 'expiration_date' in data:
+                item.expiration_date = data.get('expiration_date') or None
+            if 'comment' in data:
+                item.comment = data.get('comment') or None
+            if 'tags' in data:
+                item.tags = data.get('tags') or None
+            if 'picture' in data:
+                new_picture = data.get('picture') or None
+                if item.picture and item.picture != new_picture:
+                    old_picture = item.picture
+                item.picture = new_picture
 
-        if 'name' in data:
-            item.name = name
-        if 'description' in data:
-            item.description = data.get('description') or None
-        if 'quantity' in data:
-            item.quantity = new_quantity
-        if 'category' in data:
-            item.category = data.get('category') or None
-        if 'expiration_date' in data:
-            item.expiration_date = data.get('expiration_date') or None
-        if 'comment' in data:
-            item.comment = data.get('comment') or None
-        if 'tags' in data:
-            item.tags = data.get('tags') or None
-        if 'picture' in data:
-            new_picture = data.get('picture') or None
-            if item.picture and item.picture != new_picture:
-                old_picture = item.picture
-            item.picture = new_picture
-
-        item.save()
+            item.save()
 
     # Deleted only after the transaction commits, so the S3 call (network
     # I/O) doesn't extend how long the row lock above is held.
     if old_picture:
         delete_item_photo(old_picture)
+    if orphaned_picture:
+        delete_item_photo(orphaned_picture)
+
+    if error:
+        return error
 
     return Response(ItemNodeDetailsSerializer(item, context={'request': request}).data, status=status.HTTP_200_OK)
 
