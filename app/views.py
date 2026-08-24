@@ -1285,6 +1285,37 @@ def rename_node(request, node_type, node_id):
 
 
 @api_view(['POST'])
+def update_node(request, node_type, node_id):
+    """
+    Partially update a Room or Container's description. Only fields present
+    in the request body are touched (the frontend edits one field at a time
+    from the detail page). Any member of the owning home may do this. Items
+    have their own richer update_item endpoint instead.
+    """
+    if node_type not in ('room', 'container'):
+        return Response({"message": "Invalid node_type"}, status=status.HTTP_400_BAD_REQUEST)
+
+    node, error = _get_member_node_or_error(request, node_type, node_id)
+    if error:
+        return error
+
+    data = request.data
+    with transaction.atomic():
+        node, error = _optimistic_lock_or_error(
+            _NODE_MODEL_BY_TYPE[node_type], node.pk, data.get('expected_updated_at'), node_type
+        )
+        if error:
+            return error
+        if 'description' in data:
+            node.description = data.get('description') or None
+        node.save()
+
+    is_starred = _STAR_MODEL_BY_TYPE[node_type].objects.filter(user=request.user, **{node_type: node}).exists()
+    node_details = NodeDetailsSerializer(node, context={'is_starred': is_starred})
+    return Response(node_details.data, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
 def delete_node(request, node_type, node_id):
     """
     Move a Room, Container, or Item to the home's trash. Any member of the
