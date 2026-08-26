@@ -1124,6 +1124,64 @@ class OptimisticConcurrencyTests(APITestCase):
         self.item.refresh_from_db()
         self.assertEqual(self.item.description, "A blender")
 
+    @patch("app.views.delete_item_photo")
+    def test_update_item_picture_with_stale_expected_updated_at_deletes_orphaned_upload(self, mock_delete):
+        """
+        The frontend uploads a new photo straight to S3 before calling this
+        endpoint. If the lock check then rejects the write (item changed
+        concurrently), that upload has nothing referencing it - it must be
+        deleted from S3 instead of orphaned, without touching the item row.
+        """
+        stale = self._iso(self.item.updated_at)
+        self.item.name = "Changed By Someone Else"
+        self.item.save()
+
+        response = self.client.post(
+            reverse("app:update-item", args=[self.item.id]),
+            {"picture": "https://s3.example.com/items/new-upload.jpg", "expected_updated_at": stale},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        mock_delete.assert_called_once_with("https://s3.example.com/items/new-upload.jpg")
+        self.item.refresh_from_db()
+        self.assertIsNone(self.item.picture)
+
+    @patch("app.views.delete_item_photo")
+    def test_update_item_picture_with_stale_expected_updated_at_and_unchanged_picture_does_not_delete(self, mock_delete):
+        """A resend of the item's current picture on a stale request is not a
+        new upload, so nothing should be deleted."""
+        self.item.picture = "https://s3.example.com/items/existing.jpg"
+        self.item.save()
+        stale = self._iso(self.item.updated_at)
+        self.item.name = "Changed By Someone Else"
+        self.item.save()
+
+        response = self.client.post(
+            reverse("app:update-item", args=[self.item.id]),
+            {"picture": "https://s3.example.com/items/existing.jpg", "expected_updated_at": stale},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        mock_delete.assert_not_called()
+
+    @patch("app.views.delete_item_photo")
+    def test_update_item_picture_with_matching_expected_updated_at_succeeds_and_deletes_old_picture(self, mock_delete):
+        self.item.picture = "https://s3.example.com/items/old.jpg"
+        self.item.save()
+
+        response = self.client.post(
+            reverse("app:update-item", args=[self.item.id]),
+            {"picture": "https://s3.example.com/items/new.jpg", "expected_updated_at": self._iso(self.item.updated_at)},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        mock_delete.assert_called_once_with("https://s3.example.com/items/old.jpg")
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.picture, "https://s3.example.com/items/new.jpg")
+
 
 class TrashTests(APITestCase):
     """

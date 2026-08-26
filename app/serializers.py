@@ -12,7 +12,7 @@ from email.mime.image import MIMEImage
 from rest_framework.exceptions import AuthenticationFailed
 from django.core.signing import TimestampSigner
 from .models import CustomUser, Room, Container, Item, HomeMembership, Home
-from .services.search_helpers import get_home_id_for_item, get_item_location_path, get_ancestor_path, resolve_container_home
+from .services.search_helpers import get_home_id_for_item, get_item_location_path, get_ancestor_path, get_path_to_room_or_container, resolve_container_home
 
 
 User = get_user_model()  # reads AUTH_USER_MODEL in settings.py
@@ -232,10 +232,15 @@ class NodeDetailsSerializer(serializers.Serializer):
     home_id = serializers.SerializerMethodField()
     room_id = serializers.SerializerMethodField()
     parent_container_id = serializers.SerializerMethodField()
+    path = serializers.SerializerMethodField()
     updated_at = serializers.DateTimeField()
 
     def get_level(self, obj):
         return getattr(obj, 'level', None)
+
+    def get_path(self, obj):
+        """Breadcrumb from the owning Home down to and including this node itself."""
+        return get_path_to_room_or_container(obj)
 
     def get_is_starred(self, obj):
         return self.context.get('is_starred', False)
