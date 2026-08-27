@@ -357,9 +357,16 @@ def google_sign_in(request):
     user = CustomUser.objects.filter(google_sub=google_sub).first()
 
     if not user:
-        if CustomUser.objects.filter(email__iexact=idInfo['email']).exists():
+        existing_user = CustomUser.objects.filter(email__iexact=idInfo['email']).first()
+        if existing_user:
+            methods = []
+            if existing_user.has_password:
+                methods.append('your password')
+            if existing_user.apple_account_linked:
+                methods.append('Apple')
+            sign_in_with = ' or '.join(methods) if methods else 'your existing account'
             return Response(
-                {"message": "An account with this email already exists. Sign in with your password and link Google from Settings."},
+                {"message": f"An account with this email already exists. Sign in with {sign_in_with}, then link Google from Settings."},
                 status=status.HTTP_409_CONFLICT,
             )
         user = CustomUser.objects.create_user(
@@ -560,9 +567,16 @@ def apple_confirm(request):
             "primary_home": user.primary_home.id if user.primary_home else None,
         }, status=status.HTTP_200_OK)
 
-    if CustomUser.objects.filter(email__iexact=email).exists():
+    existing_user = CustomUser.objects.filter(email__iexact=email).first()
+    if existing_user:
+        methods = []
+        if existing_user.has_password:
+            methods.append('your password')
+        if existing_user.google_account_linked:
+            methods.append('Google')
+        sign_in_with = ' or '.join(methods) if methods else 'your existing account'
         return Response(
-            {"message": "An account with this email already exists. Log in with your password and link Apple from Settings."},
+            {"message": f"An account with this email already exists. Sign in with {sign_in_with}, then link Apple from Settings."},
             status=status.HTTP_409_CONFLICT,
         )
 
